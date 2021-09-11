@@ -5,22 +5,24 @@ from typing import (
     Iterator,
     Mapping,
     Optional,
-    Pattern,
     NamedTuple,
     Protocol,
     TypeVar,
+    Dict,
+    List,
+    Tuple,
+    Union
 )
 from io import BufferedReader, BytesIO
 from re import Pattern
 from requests.adapters import HTTPResponse, PreparedRequest
 from requests.cookies import RequestsCookieJar
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from typing_extensions import Literal
 from unittest import mock as std_mock
 from urllib.parse import quote as quote
 from urllib3.response import HTTPHeaderDict
+from .matchers import urlencoded_params_matcher, json_params_matcher
 
-JSONDecodeError = ValueError
 
 def _clean_unicode(url: str) -> str: ...
 def _cookies_from_headers(headers: Dict[str, str]) -> RequestsCookieJar: ...
@@ -36,12 +38,7 @@ def _is_string(s: Union[Pattern[str], str]) -> bool: ...
 def get_wrapped(
     func: Callable[..., Any], responses: RequestsMock
 ) -> Callable[..., Any]: ...
-def json_params_matcher(
-    params: Optional[Dict[str, Any]]
-) -> Callable[..., Any]: ...
-def urlencoded_params_matcher(
-    params: Optional[Dict[str, str]]
-) -> Callable[..., Any]: ...
+
 
 class Call(NamedTuple):
     request: PreparedRequest
@@ -75,7 +72,7 @@ class BaseResponse:
     ) -> None: ...
     def __eq__(self, other: Any) -> bool: ...
     def __ne__(self, other: Any) -> bool: ...
-    def _body_matches(
+    def _req_attr_matches(
         self, match: List[Callable[..., Any]], request_body: Optional[Union[bytes, str]]
     ) -> bool: ...
     def _should_match_querystring(
@@ -95,6 +92,7 @@ class Response(BaseResponse):
     headers: Optional[Mapping[str, str]] = ...
     stream: bool = ...
     content_type: Optional[str] = ...
+    auto_calculate_content_length: bool = ...
     def __init__(
         self,
         method: str,
@@ -105,6 +103,7 @@ class Response(BaseResponse):
         headers: Optional[Mapping[str, str]] = ...,
         stream: bool = ...,
         content_type: Optional[str] = ...,
+        auto_calculate_content_length: bool = ...,
         match_querystring: bool = ...,
         match: List[Any] = ...,
     ) -> None: ...
@@ -193,6 +192,7 @@ class _Add(Protocol):
         headers: Optional[Mapping[str, str]] = ...,
         stream: bool = ...,
         content_type: Optional[str] = ...,
+        auto_calculate_content_length: bool = ...,
         adding_headers: Optional[Mapping[str, str]] = ...,
         match_querystring: bool = ...,
         match: List[Any] = ...,

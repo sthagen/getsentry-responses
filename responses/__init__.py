@@ -15,6 +15,9 @@ from requests.adapters import HTTPAdapter
 from requests.exceptions import ConnectionError
 from requests.sessions import REDIRECT_STATI
 from requests.utils import cookiejar_from_dict
+from responses.matchers import json_params_matcher as _json_params_matcher
+from responses.matchers import urlencoded_params_matcher as _urlencoded_params_matcher
+from warnings import warn
 
 try:
     from collections.abc import Sequence, Sized
@@ -59,11 +62,6 @@ except AttributeError:
     # Python 3.7
     Pattern = re.Pattern
 
-try:
-    from json.decoder import JSONDecodeError
-except ImportError:
-    JSONDecodeError = ValueError
-
 UNSET = object()
 
 Call = namedtuple("Call", ["request", "response"])
@@ -71,6 +69,22 @@ Call = namedtuple("Call", ["request", "response"])
 _real_send = HTTPAdapter.send
 
 logger = logging.getLogger("responses")
+
+
+def urlencoded_params_matcher(params):
+    warn(
+        "Function is deprecated. Use 'from responses.matchers import urlencoded_params_matcher'",
+        DeprecationWarning,
+    )
+    return _urlencoded_params_matcher(params)
+
+
+def json_params_matcher(params):
+    warn(
+        "Function is deprecated. Use 'from responses.matchers import json_params_matcher'",
+        DeprecationWarning,
+    )
+    return _json_params_matcher(params)
 
 
 def _is_string(s):
@@ -240,33 +254,6 @@ def _handle_body(body):
 _unspecified = object()
 
 
-def urlencoded_params_matcher(params):
-    def match(request_body):
-        return (
-            params is None
-            if request_body is None
-            else sorted(params.items()) == sorted(parse_qsl(request_body))
-        )
-
-    return match
-
-
-def json_params_matcher(params):
-    def match(request_body):
-        try:
-            if isinstance(request_body, bytes):
-                request_body = request_body.decode("utf-8")
-            return (
-                params is None
-                if request_body is None
-                else params == json_module.loads(request_body)
-            )
-        except JSONDecodeError:
-            return False
-
-    return match
-
-
 class BaseResponse(object):
     content_type = None
     headers = None
@@ -345,12 +332,14 @@ class BaseResponse(object):
         else:
             return False
 
-    def _body_matches(self, match, request_body):
+    @staticmethod
+    def _req_attr_matches(match, request):
         for matcher in match:
-            if not matcher(request_body):
-                return False
+            valid, reason = matcher(request)
+            if not valid:
+                return False, reason
 
-        return True
+        return True, ""
 
     def get_headers(self):
         headers = HTTPHeaderDict()  # Duplicate headers are legal
@@ -370,8 +359,9 @@ class BaseResponse(object):
         if not self._url_matches(self.url, request.url, self.match_querystring):
             return False, "URL does not match"
 
-        if not self._body_matches(self.match, request.body):
-            return False, "Parameters do not match"
+        valid, reason = self._req_attr_matches(self.match, request)
+        if not valid:
+            return False, "Parameters do not match. " + reason
 
         return True, ""
 
@@ -387,6 +377,7 @@ class Response(BaseResponse):
         headers=None,
         stream=False,
         content_type=UNSET,
+        auto_calculate_content_length=False,
         **kwargs
     ):
         # if we were passed a `json` argument,
@@ -408,6 +399,7 @@ class Response(BaseResponse):
         self.headers = headers
         self.stream = stream
         self.content_type = content_type
+        self.auto_calculate_content_length = auto_calculate_content_length
         super(Response, self).__init__(method, url, **kwargs)
 
     def get_response(self, request):
@@ -417,6 +409,15 @@ class Response(BaseResponse):
         headers = self.get_headers()
         status = self.status
         body = _handle_body(self.body)
+
+        if (
+            self.auto_calculate_content_length
+            and isinstance(body, BufferIO)
+            and "Content-Length" not in headers
+        ):
+            content_length = len(body.getvalue())
+            headers["Content-Length"] = str(content_length)
+
         return HTTPResponse(
             status=status,
             reason=six.moves.http_client.responses.get(status),
@@ -717,9 +718,9 @@ class RequestsMock(object):
         return params
 
     def _on_request(self, adapter, request, **kwargs):
+        request.params = self._parse_request_params(request.path_url)
         match, match_failed_reasons = self._find_match(request)
         resp_callback = self.response_callback
-        request.params = self._parse_request_params(request.path_url)
 
         if match is None:
             if any(
