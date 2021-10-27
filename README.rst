@@ -123,22 +123,34 @@ headers (``dict``)
     Response headers.
 
 stream (``bool``)
-    Disabled by default. Indicates the response should use the streaming API.
+    DEPRECATED: use ``stream`` argument in request directly
 
 auto_calculate_content_length (``bool``)
     Disabled by default. Automatically calculates the length of a supplied string or JSON body.
 
 match (``list``)
-    A list of callbacks to match requests based on request body contents.
+    A list of callbacks to match requests based on request attributes.
+    Current module provides multiple matchers that you can use to match:
+
+    * body contents in JSON format
+    * body contents in URL encoded data format
+    * request query parameters
+    * request query string (similar to query parameters but takes string as input)
+    * kwargs provided to request e.g. ``stream``, ``verify``
+    * 'multipart/form-data' content and headers in request
+    * request headers
+
+    Alternatively user can create custom matcher.
+    Read more `Matching Requests`_
 
 
-Matching Request Parameters
----------------------------
+Matching Requests
+-----------------
 
 When adding responses for endpoints that are sent request data you can add
 matchers to ensure your code is sending the right parameters and provide
 different responses based on the request body contents. Responses provides
-matchers for JSON and URLencoded request bodies and you can supply your own for
+matchers for JSON and URL-encoded request bodies and you can supply your own for
 other formats.
 
 .. code-block:: python
@@ -192,6 +204,157 @@ Note, you must set ``match_querystring=False``
         assert resp.url == constructed_url
         assert resp.request.url == constructed_url
         assert resp.request.params == params
+
+
+As alternative, you can use query string value in ``matchers.query_string_matcher``
+
+.. code-block:: python
+
+    import requests
+    import responses
+    from responses import matchers
+
+    @responses.activate
+    def my_func():
+        responses.add(
+            responses.GET,
+            "https://httpbin.org/get",
+            match=[matchers.query_string_matcher("didi=pro&test=1")],
+        )
+        resp = requests.get("https://httpbin.org/get", params={"test": 1, "didi": "pro"})
+
+    my_func()
+
+To validate request arguments use the ``matchers.request_kwargs_matcher`` function to match
+against the request kwargs.
+Note, only arguments provided to ``matchers.request_kwargs_matcher`` will be validated
+
+.. code-block:: python
+
+    import responses
+    import requests
+    from responses import matchers
+
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        req_kwargs = {
+            "stream": True,
+            "verify": False,
+        }
+        rsps.add(
+            "GET",
+            "http://111.com",
+            match=[matchers.request_kwargs_matcher(req_kwargs)],
+        )
+
+        requests.get("http://111.com", stream=True)
+
+        # >>>  Arguments don't match: {stream: True, verify: True} doesn't match {stream: True, verify: False}
+
+To validate request body and headers for ``multipart/form-data`` data you can use
+``matchers.multipart_matcher``. The ``data``, and ``files`` parameters provided will be compared
+to the request:
+
+.. code-block:: python
+
+    import requests
+    import responses
+    from responses.matchers import multipart_matcher
+
+    @responses.activate
+    def my_func():
+        req_data = {"some": "other", "data": "fields"}
+        req_files = {"file_name": b"Old World!"}
+        responses.add(
+            responses.POST, url="http://httpbin.org/post",
+            match=[multipart_matcher(req_data, req_files)]
+        )
+        resp = requests.post("http://httpbin.org/post", files={"file_name": b"New World!"})
+
+    my_func()
+    # >>> raises ConnectionError: multipart/form-data doesn't match. Request body differs.
+
+Matching Request Headers
+------------------------
+
+When adding responses you can specify matchers to ensure that your code is
+sending the right headers and provide different responses based on the request
+headers.
+
+.. code-block:: python
+
+    import responses
+    import requests
+    from responses import matchers
+
+
+    @responses.activate
+    def test_content_type():
+        responses.add(
+            responses.GET,
+            url="http://example.com/",
+            body="hello world",
+            match=[
+                matchers.header_matcher({"Accept": "text/plain"})
+            ]
+        )
+
+        responses.add(
+            responses.GET,
+            url="http://example.com/",
+            json={"content": "hello world"},
+            match=[
+                matchers.header_matcher({"Accept": "application/json"})
+            ]
+        )
+
+        # request in reverse order to how they were added!
+        resp = requests.get("http://example.com/", headers={"Accept": "application/json"})
+        assert resp.json() == {"content": "hello world"}
+
+        resp = requests.get("http://example.com/", headers={"Accept": "text/plain"})
+        assert resp.text == "hello world"
+
+Because ``requests`` will send several standard headers in addition to what was
+specified by your code, request headers that are additional to the ones
+passed to the matcher are ignored by default. You can change this behaviour by
+passing ``strict_match=True`` to the matcher to ensure that only the headers
+that you're expecting are sent and no others. Note that you will probably have
+to use a ``PreparedRequest`` in your code to ensure that ``requests`` doesn't
+include any additional headers.
+
+.. code-block:: python
+
+    import responses
+    import requests
+    from responses import matchers
+
+    @responses.activate
+    def test_content_type():
+        responses.add(
+            responses.GET,
+            url="http://example.com/",
+            body="hello world",
+            match=[
+                matchers.header_matcher({"Accept": "text/plain"}, strict_match=True)
+            ]
+        )
+
+        # this will fail because requests adds its own headers
+        with pytest.raises(ConnectionError):
+            requests.get("http://example.com/", headers={"Accept": "text/plain"})
+
+        # a prepared request where you overwrite the headers before sending will work
+        session = requests.Session()
+        prepped = session.prepare_request(
+            requests.Request(
+                method="GET",
+                url="http://example.com/",
+            )
+        )
+        prepped.headers = {"Accept": "text/plain"}
+
+        resp = session.send(prepped)
+        assert resp.text == "hello world"
 
 Dynamic Responses
 -----------------
