@@ -16,6 +16,7 @@ from requests.exceptions import ConnectionError
 from requests.utils import cookiejar_from_dict
 from responses.matchers import json_params_matcher as _json_params_matcher
 from responses.matchers import urlencoded_params_matcher as _urlencoded_params_matcher
+from responses.matchers import query_string_matcher as _query_string_matcher
 from warnings import warn
 
 try:
@@ -37,10 +38,17 @@ except ImportError:  # pragma: no cover
     from urllib3.util.url import parse_url  # pragma: no cover
 
 if six.PY2:
-    from urlparse import urlparse, parse_qsl, urlsplit, urlunsplit
+    from urlparse import urlparse, urlunparse, parse_qsl, urlsplit, urlunsplit
     from urllib import quote
 else:
-    from urllib.parse import urlparse, parse_qsl, urlsplit, urlunsplit, quote
+    from urllib.parse import (
+        urlparse,
+        urlunparse,
+        parse_qsl,
+        urlsplit,
+        urlunsplit,
+        quote,
+    )
 
 if six.PY2:
     try:
@@ -126,13 +134,13 @@ def _ensure_str(s):
 
 def _cookies_from_headers(headers):
     try:
-        import http.cookies as cookies
+        import http.cookies as _cookies
 
-        resp_cookie = cookies.SimpleCookie()
+        resp_cookie = _cookies.SimpleCookie()
         resp_cookie.load(headers["set-cookie"])
 
         cookies_dict = {name: v.value for name, v in resp_cookie.items()}
-    except ImportError:
+    except (ImportError, AttributeError):
         from cookies import Cookies
 
         resp_cookies = Cookies.from_request(_ensure_str(headers["set-cookie"]))
@@ -156,8 +164,6 @@ def get_wrapped(func, responses):
 
         # Preserve the argspec for the wrapped function so that testing
         # tools such as pytest can continue to use their fixture injection.
-        if hasattr(func, "__self__"):
-            args = args[1:]  # Omit 'self'
         func_args = inspect.formatargspec(args, a, kw, None)
     else:
         signature = inspect.signature(func)
@@ -227,6 +233,14 @@ def _ensure_url_default_path(url):
     return url
 
 
+def _get_url_and_path(url):
+    url_parsed = urlparse(url)
+    url_and_path = urlunparse(
+        [url_parsed.scheme, url_parsed.netloc, url_parsed.path, None, None, None]
+    )
+    return parse_url(url_and_path).url
+
+
 def _handle_body(body):
     if isinstance(body, six.text_type):
         body = body.encode("utf-8")
@@ -236,9 +250,6 @@ def _handle_body(body):
     return BufferIO(body)
 
 
-_unspecified = object()
-
-
 class BaseResponse(object):
     passthrough = False
     content_type = None
@@ -246,11 +257,14 @@ class BaseResponse(object):
 
     stream = False
 
-    def __init__(self, method, url, match_querystring=_unspecified, match=[]):
+    def __init__(self, method, url, match_querystring=None, match=()):
         self.method = method
         # ensure the url has a default path set if the url is a string
         self.url = _ensure_url_default_path(url)
-        self.match_querystring = self._should_match_querystring(match_querystring)
+
+        if self._should_match_querystring(match_querystring):
+            match = tuple(match) + (_query_string_matcher(urlparse(self.url).query),)
+
         self.match = match
         self.call_count = 0
 
@@ -272,45 +286,32 @@ class BaseResponse(object):
     def __ne__(self, other):
         return not self.__eq__(other)
 
-    def _url_matches_strict(self, url, other):
-        url_parsed = urlparse(url)
-        other_parsed = urlparse(other)
-
-        if url_parsed[:3] != other_parsed[:3]:
-            return False
-
-        url_qsl = sorted(parse_qsl(url_parsed.query))
-        other_qsl = sorted(parse_qsl(other_parsed.query))
-
-        return url_qsl == other_qsl
-
     def _should_match_querystring(self, match_querystring_argument):
-        if match_querystring_argument is not _unspecified:
-            return match_querystring_argument
-
         if isinstance(self.url, Pattern):
             # the old default from <= 0.9.0
             return False
 
+        if match_querystring_argument is not None:
+            warn(
+                (
+                    "Argument 'match_querystring' is deprecated. "
+                    "Use 'responses.matchers.query_param_matcher' or "
+                    "'responses.matchers.query_string_matcher'"
+                ),
+                DeprecationWarning,
+            )
+            return match_querystring_argument
+
         return bool(urlparse(self.url).query)
 
-    def _url_matches(self, url, other, match_querystring=False):
+    def _url_matches(self, url, other):
         if _is_string(url):
             if _has_unicode(url):
                 url = _clean_unicode(url)
                 if not isinstance(other, six.text_type):
                     other = other.encode("ascii").decode("utf8")
 
-            if match_querystring:
-                normalize_url = parse_url(url).url
-                return self._url_matches_strict(normalize_url, other)
-
-            else:
-                url_without_qs = url.split("?", 1)[0]
-                other_without_qs = other.split("?", 1)[0]
-                normalized_url_without_qs = parse_url(url_without_qs).url
-
-                return normalized_url_without_qs == other_without_qs
+            return _get_url_and_path(url) == _get_url_and_path(other)
 
         elif isinstance(url, Pattern) and url.match(other):
             return True
@@ -342,7 +343,7 @@ class BaseResponse(object):
         if request.method != self.method:
             return False, "Method does not match"
 
-        if not self._url_matches(self.url, request.url, self.match_querystring):
+        if not self._url_matches(self.url, request.url):
             return False, "URL does not match"
 
         valid, reason = self._req_attr_matches(self.match, request)
@@ -507,6 +508,9 @@ class OriginalResponseShim(object):
     def isclosed(self):
         return True
 
+    def close(self):
+        return
+
 
 class RequestsMock(object):
     DELETE = "DELETE"
@@ -535,6 +539,7 @@ class RequestsMock(object):
     def reset(self):
         self._matches = []
         self._calls.reset()
+        self.passthru_prefixes = ()
 
     def add(
         self,
@@ -571,14 +576,6 @@ class RequestsMock(object):
         >>>     headers={'X-Header': 'foo'},
         >>> )
 
-
-        Strict query string matching:
-
-        >>> responses.add(
-        >>>     method='GET',
-        >>>     url='http://example.com?foo=bar',
-        >>>     match_querystring=True
-        >>> )
         """
         if isinstance(method, BaseResponse):
             self._matches.append(method)
@@ -659,7 +656,13 @@ class RequestsMock(object):
             self.add(method_or_response, url, body, *args, **kwargs)
 
     def add_callback(
-        self, method, url, callback, match_querystring=False, content_type="text/plain"
+        self,
+        method,
+        url,
+        callback,
+        match_querystring=False,
+        content_type="text/plain",
+        match=(),
     ):
         # ensure the url has a default path set if the url is a string
         # url = _ensure_url_default_path(url, match_querystring)
@@ -671,6 +674,7 @@ class RequestsMock(object):
                 callback=callback,
                 content_type=content_type,
                 match_querystring=match_querystring,
+                match=match,
             )
         )
 
@@ -780,10 +784,10 @@ class RequestsMock(object):
                 response = resp_callback(response) if resp_callback else response
                 raise
 
-        stream = kwargs.get("stream") if match.stream is None else match.stream
+        stream = kwargs.get("stream")
         if not stream:
-            content = response.content
-            response.raw = BufferIO(content)
+            response.content  # NOQA required to ensure that response body is read.
+            response.close()
 
         response = resp_callback(response) if resp_callback else response
         match.call_count += 1

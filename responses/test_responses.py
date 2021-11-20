@@ -7,12 +7,11 @@ import os
 import re
 import six
 from io import BufferedReader, BytesIO
-from sys import version_info
 
 import pytest
 import requests
 import responses
-from requests.exceptions import ConnectionError, HTTPError
+from requests.exceptions import ConnectionError, HTTPError, ChunkedEncodingError
 from responses import (
     BaseResponse,
     Response,
@@ -343,28 +342,7 @@ def test_match_querystring():
     assert_reset()
 
 
-def test_query_string_matcher():
-    @responses.activate
-    def run():
-        url = "http://example.com?test=1&foo=bar"
-        responses.add(
-            responses.GET,
-            url,
-            body=b"test",
-            match=[matchers.query_string_matcher("test=1&foo=bar")],
-        )
-        resp = requests.get("http://example.com?test=1&foo=bar")
-        assert_response(resp, "test")
-        resp = requests.get("http://example.com?foo=bar&test=1")
-        assert_response(resp, "test")
-        resp = requests.get("http://example.com/?foo=bar&test=1")
-        assert_response(resp, "test")
-
-    run()
-    assert_reset()
-
-
-def test_match_empty_querystring():
+def test_match_querystring_empty():
     @responses.activate
     def run():
         responses.add(
@@ -669,6 +647,62 @@ def test_callback_content_type_dict():
     assert_reset()
 
 
+def test_callback_matchers():
+    def request_callback(request):
+        return (
+            200,
+            {"Content-Type": "application/json"},
+            b"foo",
+        )
+
+    @responses.activate
+    def run():
+        req_data = {"some": "other", "data": "fields"}
+        req_files = {"file_name": b"Old World!"}
+
+        responses.add_callback(
+            responses.POST,
+            url="http://httpbin.org/post",
+            match=[matchers.multipart_matcher(req_files, data=req_data)],
+            callback=request_callback,
+        )
+        resp = requests.post("http://httpbin.org/post", data=req_data, files=req_files)
+        assert resp.text == "foo"
+        assert resp.headers["content-type"] == "application/json"
+
+    run()
+    assert_reset()
+
+
+def test_callback_matchers_fail():
+    @responses.activate
+    def run():
+        req_data = {"some": "other", "data": "fields"}
+        req_files = {"file_name": b"Old World!"}
+
+        responses.add_callback(
+            responses.POST,
+            url="http://httpbin.org/post",
+            match=[matchers.multipart_matcher(req_files, data=req_data)],
+            callback=lambda x: (
+                0,
+                {"a": ""},
+                "",
+            ),
+        )
+        with pytest.raises(ConnectionError) as exc:
+            requests.post(
+                "http://httpbin.org/post",
+                data={"some": "other", "data": "wrong"},
+                files=req_files,
+            )
+
+        assert "multipart/form-data doesn't match." in str(exc.value)
+
+    run()
+    assert_reset()
+
+
 def test_callback_content_type_tuple():
     def request_callback(request):
         return (
@@ -708,6 +742,12 @@ def test_regular_expression_url():
 
     run()
     assert_reset()
+
+
+def test_base_response_get_response():
+    resp = BaseResponse("GET", ".com")
+    with pytest.raises(NotImplementedError):
+        resp.get_response(requests.PreparedRequest())
 
 
 def test_custom_adapter():
@@ -777,6 +817,29 @@ def test_activate_doesnt_change_signature():
     assert decorated_test_function(3) == test_function(3)
 
 
+@pytest.fixture
+def my_fruit():
+    return "apple"
+
+
+@pytest.fixture
+def fruit_basket(my_fruit):
+    return ["banana", my_fruit]
+
+
+@pytest.mark.usefixtures("my_fruit", "fruit_basket")
+class TestFixtures(object):
+    """
+    Test that pytest fixtures work well with 'activate' decorator
+    """
+
+    def test_function(self, my_fruit, fruit_basket):
+        assert my_fruit in fruit_basket
+        assert my_fruit == "apple"
+
+    test_function_decorated = responses.activate(test_function)
+
+
 def test_activate_mock_interaction():
     @patch("sys.stdout")
     def test_function(mock_stdout):
@@ -802,7 +865,7 @@ def test_activate_mock_interaction():
 @pytest.mark.skipif(six.PY2, reason="Cannot run in python2")
 def test_activate_doesnt_change_signature_with_return_type():
     def test_function(a, b=None):
-        return (a, b)
+        return a, b
 
     # Add type annotations as they are syntax errors in py2.
     # Use a class to test for import errors in evaled code.
@@ -810,14 +873,10 @@ def test_activate_doesnt_change_signature_with_return_type():
     test_function.__annotations__["a"] = Mock
 
     decorated_test_function = responses.activate(test_function)
-    if hasattr(inspect, "signature"):
-        assert inspect.signature(test_function) == inspect.signature(
-            decorated_test_function
-        )
-    else:
-        assert inspect.getargspec(test_function) == inspect.getargspec(
-            decorated_test_function
-        )
+    assert inspect.signature(test_function) == inspect.signature(
+        decorated_test_function
+    )
+
     assert decorated_test_function(1, 2) == test_function(1, 2)
     assert decorated_test_function(3) == test_function(3)
 
@@ -857,7 +916,7 @@ def test_response_cookies():
     assert_reset()
 
 
-def test_response_secure_cookies():
+def test_response_cookies_secure():
     body = b"test callback"
     status = 200
     headers = {"set-cookie": "session_id=12345; a=b; c=d; secure"}
@@ -901,6 +960,38 @@ def test_response_cookies_multiple():
         assert set(resp.cookies.keys()) == set(["1P_JAR", "NID"])
         assert resp.cookies["1P_JAR"] == "2019-12-31-23"
         assert resp.cookies["NID"] == "some=value"
+
+    run()
+    assert_reset()
+
+
+@pytest.mark.parametrize("request_stream", (True, False, None))
+@pytest.mark.parametrize("responses_stream", (True, False, None))
+def test_response_cookies_session(request_stream, responses_stream):
+    @responses.activate
+    def run():
+        url = "https://example.com/path"
+        responses.add(
+            responses.GET,
+            url,
+            headers=[
+                ("Set-cookie", "mycookie=cookieval; path=/; secure"),
+            ],
+            body="ok",
+            stream=responses_stream,
+        )
+        session = requests.session()
+        resp = session.get(url, stream=request_stream)
+        assert resp.text == "ok"
+        assert resp.status_code == 200
+
+        assert "mycookie" in resp.cookies
+        assert resp.cookies["mycookie"] == "cookieval"
+        assert set(resp.cookies.keys()) == set(["mycookie"])
+
+        assert "mycookie" in session.cookies
+        assert session.cookies["mycookie"] == "cookieval"
+        assert set(session.cookies.keys()) == set(["mycookie"])
 
     run()
     assert_reset()
@@ -1115,6 +1206,43 @@ def test_headers():
         )
         resp = requests.get("http://example.com")
         assert resp.headers["X-Test"] == "foo"
+
+    run()
+    assert_reset()
+
+
+def test_content_length_error(monkeypatch):
+    """
+    Currently 'requests' does not enforce content length validation,
+    (validation that body length matches header). However, this could
+    be expected in next major version, see
+    https://github.com/psf/requests/pull/3563
+
+    Now user can manually patch URL3 lib to achieve the same
+    """
+
+    @responses.activate
+    def run():
+        responses.add(
+            responses.GET,
+            "http://example.com/api/123",
+            json={"message": "this body is too large"},
+            adding_headers={"content-length": "2"},
+        )
+        with pytest.raises(ChunkedEncodingError) as exc:
+            requests.get("http://example.com/api/123")
+
+        assert "IncompleteRead" in str(exc.value)
+
+    original_init = getattr(requests.packages.urllib3.HTTPResponse, "__init__")
+
+    def patched_init(self, *args, **kwargs):
+        kwargs["enforce_content_length"] = True
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        requests.packages.urllib3.HTTPResponse, "__init__", patched_init
+    )
 
     run()
     assert_reset()
@@ -1418,6 +1546,32 @@ def test_passthru_regex(httpserver):
     assert_reset()
 
 
+def test_passthru_does_not_persist_across_tests(httpserver):
+    """
+    passthru should be erased on exit from context manager
+    see:
+    https://github.com/getsentry/responses/issues/322
+    """
+    httpserver.serve_content("OK", headers={"Content-Type": "text/plain"})
+
+    @responses.activate
+    def with_a_passthru():
+        assert not responses._default_mock.passthru_prefixes
+        responses.add_passthru(re.compile(".*"))
+        response = requests.get("https://example.com")
+
+        assert response.status_code == 200
+
+    @responses.activate
+    def without_a_passthru():
+        assert not responses._default_mock.passthru_prefixes
+        with pytest.raises(requests.exceptions.ConnectionError):
+            requests.get("https://example.com")
+
+    with_a_passthru()
+    without_a_passthru()
+
+
 def test_method_named_param():
     @responses.activate
     def run():
@@ -1549,182 +1703,6 @@ def test_assert_call_count(url):
     assert_reset()
 
 
-def test_request_matches_post_params():
-    @responses.activate
-    def run(deprecated):
-        if deprecated:
-            json_params_matcher = getattr(responses, "json_params_matcher")
-            urlencoded_params_matcher = getattr(responses, "urlencoded_params_matcher")
-        else:
-            json_params_matcher = matchers.json_params_matcher
-            urlencoded_params_matcher = matchers.urlencoded_params_matcher
-
-        responses.add(
-            method=responses.POST,
-            url="http://example.com/",
-            body="one",
-            match=[json_params_matcher({"page": {"name": "first", "type": "json"}})],
-        )
-        responses.add(
-            method=responses.POST,
-            url="http://example.com/",
-            body="two",
-            match=[urlencoded_params_matcher({"page": "second", "type": "urlencoded"})],
-        )
-
-        resp = requests.request(
-            "POST",
-            "http://example.com/",
-            headers={"Content-Type": "x-www-form-urlencoded"},
-            data={"page": "second", "type": "urlencoded"},
-        )
-        assert_response(resp, "two")
-
-        resp = requests.request(
-            "POST",
-            "http://example.com/",
-            headers={"Content-Type": "application/json"},
-            json={"page": {"name": "first", "type": "json"}},
-        )
-        assert_response(resp, "one")
-
-    with pytest.deprecated_call():
-        run(deprecated=True)
-        assert_reset()
-
-    run(deprecated=False)
-    assert_reset()
-
-
-def test_request_matches_empty_body():
-    def run():
-        with responses.RequestsMock(assert_all_requests_are_fired=True) as rsps:
-            # test that both json and urlencoded body are empty in matcher and in request
-            rsps.add(
-                method=responses.POST,
-                url="http://example.com/",
-                body="one",
-                match=[matchers.json_params_matcher(None)],
-            )
-
-            rsps.add(
-                method=responses.POST,
-                url="http://example.com/",
-                body="two",
-                match=[matchers.urlencoded_params_matcher(None)],
-            )
-
-            resp = requests.request("POST", "http://example.com/")
-            assert_response(resp, "one")
-
-            resp = requests.request(
-                "POST",
-                "http://example.com/",
-                headers={"Content-Type": "x-www-form-urlencoded"},
-            )
-            assert_response(resp, "two")
-
-        with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
-            # test exception raise if matcher body is None but request data is not None
-            rsps.add(
-                method=responses.POST,
-                url="http://example.com/",
-                body="one",
-                match=[matchers.json_params_matcher(None)],
-            )
-
-            with pytest.raises(ConnectionError) as excinfo:
-                resp = requests.request(
-                    "POST",
-                    "http://example.com/",
-                    json={"my": "data"},
-                    headers={"Content-Type": "application/json"},
-                )
-
-            msg = str(excinfo.value)
-            assert "request.body doesn't match: {my: data} doesn't match {}" in msg
-
-        with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
-            rsps.add(
-                method=responses.POST,
-                url="http://example.com/",
-                body="two",
-                match=[matchers.urlencoded_params_matcher(None)],
-            )
-            with pytest.raises(ConnectionError) as excinfo:
-                resp = requests.request(
-                    "POST",
-                    "http://example.com/",
-                    headers={"Content-Type": "x-www-form-urlencoded"},
-                    data={"page": "second", "type": "urlencoded"},
-                )
-            msg = str(excinfo.value)
-            assert (
-                "request.body doesn't match: {page: second, type: urlencoded} doesn't match {}"
-                in msg
-            )
-
-    run()
-    assert_reset()
-
-
-def test_request_matches_params():
-    @responses.activate
-    def run():
-        url = "http://example.com/test"
-        params = {"hello": "world", "I am": "a big test"}
-        responses.add(
-            method=responses.GET,
-            url=url,
-            body="test",
-            match=[matchers.query_param_matcher(params)],
-            match_querystring=False,
-        )
-
-        # exchange parameter places for the test
-        params = {
-            "I am": "a big test",
-            "hello": "world",
-        }
-        resp = requests.get(url, params=params)
-
-        if six.PY3 and version_info[1] >= 7:
-            # only after py 3.7 dictionaries are ordered, so we can check URL
-            constructed_url = r"http://example.com/test?I+am=a+big+test&hello=world"
-            assert resp.url == constructed_url
-            assert resp.request.url == constructed_url
-
-        resp_params = getattr(resp.request, "params")
-        assert resp_params == params
-
-    run()
-    assert_reset()
-
-
-def test_multipart_matcher():
-    @responses.activate
-    def run():
-        req_data = {"some": "other", "data": "fields"}
-        req_files = {"file_name": b"Old World!"}
-        responses.add(
-            responses.POST,
-            url="http://httpbin.org/post",
-            match=[matchers.multipart_matcher(req_files, data=req_data)],
-        )
-        resp = requests.post("http://httpbin.org/post", data=req_data, files=req_files)
-        assert resp.status_code == 200
-
-        with pytest.raises(TypeError):
-            responses.add(
-                responses.POST,
-                url="http://httpbin.org/post",
-                match=[matchers.multipart_matcher(files={})],
-            )
-
-    run()
-    assert_reset()
-
-
 def test_fail_request_error():
     """
     Validate that exception is raised if request URL/Method/kwargs don't match
@@ -1742,308 +1720,6 @@ def test_fail_request_error():
             msg = str(excinfo.value)
             assert "- POST http://example1.com/ URL does not match" in msg
             assert "- GET http://example.com/ Method does not match" in msg
-
-    run()
-    assert_reset()
-
-
-def test_fail_matchers_error():
-    """
-    Validate that Exception is raised if request does not match responses.matchers
-        validate matchers.urlencoded_params_matcher
-        validate matchers.json_params_matcher
-        validate matchers.query_param_matcher
-        validate matchers.request_kwargs_matcher
-    :return: None
-    """
-
-    def run():
-        with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
-            rsps.add(
-                "POST",
-                "http://example.com",
-                match=[matchers.urlencoded_params_matcher({"foo": "bar"})],
-            )
-            rsps.add(
-                "POST",
-                "http://example.com",
-                match=[matchers.json_params_matcher({"fail": "json"})],
-            )
-
-            with pytest.raises(ConnectionError) as excinfo:
-                requests.post("http://example.com", data={"id": "bad"})
-
-            msg = str(excinfo.value)
-            assert (
-                "request.body doesn't match: {id: bad} doesn't match {foo: bar}" in msg
-            )
-
-            assert (
-                "request.body doesn't match: JSONDecodeError: Cannot parse request.body"
-                in msg
-            )
-
-        with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
-            rsps.add(
-                "GET",
-                "http://111.com",
-                match=[matchers.query_param_matcher({"my": "params"})],
-            )
-
-            rsps.add(
-                method=responses.GET,
-                url="http://111.com/",
-                body="two",
-                match=[matchers.json_params_matcher({"page": "one"})],
-            )
-
-            with pytest.raises(ConnectionError) as excinfo:
-                requests.get(
-                    "http://111.com", params={"id": "bad"}, json={"page": "two"}
-                )
-
-            msg = str(excinfo.value)
-            assert (
-                "Parameters do not match. {id: bad} doesn't match {my: params}" in msg
-            )
-            assert (
-                "request.body doesn't match: {page: two} doesn't match {page: one}"
-                in msg
-            )
-
-        with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
-            req_kwargs = {
-                "stream": True,
-                "verify": False,
-            }
-            rsps.add(
-                "GET",
-                "http://111.com",
-                match=[matchers.request_kwargs_matcher(req_kwargs)],
-            )
-
-            with pytest.raises(ConnectionError) as excinfo:
-                requests.get("http://111.com", stream=True)
-
-            msg = str(excinfo.value)
-            assert (
-                "Arguments don't match: "
-                "{stream: True, verify: True} doesn't match {stream: True, verify: False}"
-            ) in msg
-
-    run()
-    assert_reset()
-
-
-def test_fail_multipart_matcher():
-    """
-    Validate that Exception is raised if request does not match responses.matchers
-        validate matchers.multipart_matcher
-    :return: None
-    """
-
-    def run():
-        # different file contents
-        with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
-            req_data = {"some": "other", "data": "fields"}
-            req_files = {"file_name": b"Old World!"}
-            rsps.add(
-                responses.POST,
-                url="http://httpbin.org/post",
-                match=[matchers.multipart_matcher(req_files, data=req_data)],
-            )
-
-            with pytest.raises(ConnectionError) as excinfo:
-                requests.post(
-                    "http://httpbin.org/post",
-                    data=req_data,
-                    files={"file_name": b"New World!"},
-                )
-
-            msg = str(excinfo.value)
-            assert "multipart/form-data doesn't match. Request body differs." in msg
-            assert (
-                '\r\nContent-Disposition: form-data; name="file_name"; '
-                'filename="file_name"\r\n\r\nOld World!\r\n'
-            ) in msg
-            assert (
-                '\r\nContent-Disposition: form-data; name="file_name"; '
-                'filename="file_name"\r\n\r\nNew World!\r\n'
-            ) in msg
-
-        # x-www-form-urlencoded request
-        with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
-            req_data = {"some": "other", "data": "fields"}
-            req_files = {"file_name": b"Old World!"}
-            rsps.add(
-                responses.POST,
-                url="http://httpbin.org/post",
-                match=[matchers.multipart_matcher(req_files, data=req_data)],
-            )
-
-            with pytest.raises(ConnectionError) as excinfo:
-                requests.post("http://httpbin.org/post", data=req_data)
-
-            msg = str(excinfo.value)
-            assert (
-                "multipart/form-data doesn't match. Request headers['Content-Type'] is different."
-                in msg
-            )
-            assert (
-                "application/x-www-form-urlencoded isn't equal to multipart/form-data; boundary="
-                in msg
-            )
-
-        # empty body request
-        with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
-            req_files = {"file_name": b"Old World!"}
-            rsps.add(
-                responses.POST,
-                url="http://httpbin.org/post",
-                match=[matchers.multipart_matcher(req_files)],
-            )
-
-            with pytest.raises(ConnectionError) as excinfo:
-                requests.post("http://httpbin.org/post")
-
-            msg = str(excinfo.value)
-            assert "Request is missing the 'Content-Type' header" in msg
-
-    run()
-    assert_reset()
-
-
-def test_query_string_matcher_raises():
-    """
-    Validate that Exception is raised if request does not match responses.matchers
-        validate matchers.query_string_matcher
-            :return: None
-    """
-
-    def run():
-        with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
-            rsps.add(
-                "GET",
-                "http://111.com",
-                match=[matchers.query_string_matcher("didi=pro")],
-            )
-
-            with pytest.raises(ConnectionError) as excinfo:
-                requests.get("http://111.com", params={"test": "1", "didi": "pro"})
-
-            msg = str(excinfo.value)
-            assert (
-                "Query string doesn't match. {didi: pro, test: 1} doesn't match {didi: pro}"
-                in msg
-            )
-
-    run()
-    assert_reset()
-
-
-def test_request_matches_headers():
-    @responses.activate
-    def run():
-        url = "http://example.com/"
-        responses.add(
-            method=responses.GET,
-            url=url,
-            json={"success": True},
-            match=[matchers.header_matcher({"Accept": "application/json"})],
-        )
-
-        responses.add(
-            method=responses.GET,
-            url=url,
-            body="success",
-            match=[matchers.header_matcher({"Accept": "text/plain"})],
-        )
-
-        # the actual request can contain extra headers (requests always adds some itself anyway)
-        resp = requests.get(
-            url, headers={"Accept": "application/json", "Accept-Charset": "utf-8"}
-        )
-        assert_response(resp, body='{"success": true}', content_type="application/json")
-
-        resp = requests.get(url, headers={"Accept": "text/plain"})
-        assert_response(resp, body="success", content_type="text/plain")
-
-    run()
-    assert_reset()
-
-
-def test_request_matches_headers_no_match():
-    @responses.activate
-    def run():
-        url = "http://example.com/"
-        responses.add(
-            method=responses.GET,
-            url=url,
-            json={"success": True},
-            match=[matchers.header_matcher({"Accept": "application/json"})],
-        )
-
-        with pytest.raises(ConnectionError) as excinfo:
-            requests.get(url, headers={"Accept": "application/xml"})
-
-        msg = str(excinfo.value)
-        assert (
-            "Headers do not match: {Accept: application/xml} doesn't match "
-            "{Accept: application/json}"
-        ) in msg
-
-    run()
-    assert_reset()
-
-
-def test_request_matches_headers_strict_match():
-    @responses.activate
-    def run():
-        url = "http://example.com/"
-        responses.add(
-            method=responses.GET,
-            url=url,
-            body="success",
-            match=[
-                matchers.header_matcher({"Accept": "text/plain"}, strict_match=True)
-            ],
-        )
-
-        # requests will add some extra headers of its own, so we have to use prepared requests
-        session = requests.Session()
-
-        # make sure we send *just* the header we're expectin
-        prepped = session.prepare_request(
-            requests.Request(
-                method="GET",
-                url=url,
-            )
-        )
-        prepped.headers.clear()
-        prepped.headers["Accept"] = "text/plain"
-
-        resp = session.send(prepped)
-        assert_response(resp, body="success", content_type="text/plain")
-
-        # include the "Accept-Charset" header, which will fail to match
-        prepped = session.prepare_request(
-            requests.Request(
-                method="GET",
-                url=url,
-            )
-        )
-        prepped.headers.clear()
-        prepped.headers["Accept"] = "text/plain"
-        prepped.headers["Accept-Charset"] = "utf-8"
-
-        with pytest.raises(ConnectionError) as excinfo:
-            session.send(prepped)
-
-        msg = str(excinfo.value)
-        assert (
-            "Headers do not match: {Accept: text/plain, Accept-Charset: utf-8} "
-            "doesn't match {Accept: text/plain}"
-        ) in msg
 
     run()
     assert_reset()
@@ -2142,28 +1818,3 @@ def test_rfc_compliance(url, other_url):
 
     run()
     assert_reset()
-
-
-def test_matchers_create_key_val_str():
-    """
-    Test that matchers._create_key_val_str does recursive conversion
-    """
-    data = {
-        "my_list": [
-            1,
-            2,
-            "a",
-            {"key1": "val1", "key2": 2, 3: "test"},
-            "!",
-            [["list", "nested"], {"nested": "dict"}],
-        ],
-        1: 4,
-        "test": "val",
-        "high": {"nested": "nested_dict"},
-    }
-    conv_str = matchers._create_key_val_str(data)
-    reference = (
-        "{1: 4, high: {nested: nested_dict}, my_list: [!, 1, 2, [[list, nested], {nested: dict}], "
-        "a, {3: test, key1: val1, key2: 2}], test: val}"
-    )
-    assert conv_str == reference

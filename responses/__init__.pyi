@@ -11,7 +11,8 @@ from typing import (
     Dict,
     List,
     Tuple,
-    Union
+    Union,
+    Iterable
 )
 from io import BufferedReader, BytesIO
 from re import Pattern
@@ -30,6 +31,7 @@ def _ensure_str(s: str) -> str: ...
 def _ensure_url_default_path(
     url: Union[Pattern[str], str]
 ) -> Union[Pattern[str], str]: ...
+def _get_url_and_path(url: str) -> str: ...
 def _handle_body(
     body: Optional[Union[bytes, BufferedReader, str]]
 ) -> Union[BufferedReader, BytesIO]: ...
@@ -45,6 +47,8 @@ class Call(NamedTuple):
     response: Any
 
 _Body = Union[str, BaseException, "Response", BufferedReader, bytes]
+
+MatcherIterable = Iterable[Callable[[Any], Callable[..., Any]]]
 
 class CallList(Sequence[Call], Sized):
     def __init__(self) -> None: ...
@@ -62,19 +66,19 @@ class BaseResponse:
     method: Any = ...
     url: Any = ...
     match_querystring: Any = ...
-    match: List[Any] = ...
+    match: MatcherIterable = ...
     call_count: int = ...
     def __init__(
         self,
         method: str,
         url: Union[Pattern[str], str],
         match_querystring: Union[bool, object] = ...,
-        match: List[Callable[..., Any]] = ...,
+        match: MatcherIterable = ...,
     ) -> None: ...
     def __eq__(self, other: Any) -> bool: ...
     def __ne__(self, other: Any) -> bool: ...
     def _req_attr_matches(
-        self, match: List[Callable[..., Any]], request: Optional[Union[bytes, str]]
+        self, match: MatcherIterable, request: Optional[Union[bytes, str]]
     ) -> Tuple[bool, str]: ...
     def _should_match_querystring(
         self, match_querystring_argument: Union[bool, object]
@@ -106,7 +110,7 @@ class Response(BaseResponse):
         content_type: Optional[str] = ...,
         auto_calculate_content_length: bool = ...,
         match_querystring: bool = ...,
-        match: List[Any] = ...,
+        match: MatcherIterable = ...,
     ) -> None: ...
     def get_response(  # type: ignore [override]
         self, request: PreparedRequest
@@ -124,7 +128,7 @@ class CallbackResponse(BaseResponse):
         stream: bool = ...,
         content_type: Optional[str] = ...,
         match_querystring: bool = ...,
-        match: List[Any] = ...,
+        match: MatcherIterable = ...,
     ) -> None: ...
     def get_response(  # type: ignore [override]
         self, request: PreparedRequest
@@ -182,6 +186,8 @@ class RequestsMock:
 
 _F = TypeVar("_F", bound=Callable[..., Any])
 
+HeaderSet = Optional[Union[Mapping[str, str], List[Tuple[str, str]]]]
+
 class _Activate(Protocol):
     def __call__(self, func: _F) -> _F: ...
 
@@ -193,13 +199,13 @@ class _Add(Protocol):
         body: _Body = ...,
         json: Optional[Any] = ...,
         status: int = ...,
-        headers: Optional[Mapping[str, str]] = ...,
+        headers: HeaderSet = ...,
         stream: bool = ...,
         content_type: Optional[str] = ...,
         auto_calculate_content_length: bool = ...,
-        adding_headers: Optional[Mapping[str, str]] = ...,
+        adding_headers: HeaderSet = ...,
         match_querystring: bool = ...,
-        match: List[Any] = ...,
+        match: MatcherIterable = ...,
     ) -> None: ...
 
 class _AddCallback(Protocol):
@@ -210,6 +216,7 @@ class _AddCallback(Protocol):
         callback: Callable[[PreparedRequest], Union[Exception, Tuple[int, Mapping[str, str], _Body]]],
         match_querystring: bool = ...,
         content_type: Optional[str] = ...,
+        match: MatcherIterable = ...,
     ) -> None: ...
 
 class _AddPassthru(Protocol):
@@ -232,12 +239,12 @@ class _Replace(Protocol):
         body: _Body = ...,
         json: Optional[Any] = ...,
         status: int = ...,
-        headers: Optional[Mapping[str, str]] = ...,
+        headers: HeaderSet = ...,
         stream: bool = ...,
         content_type: Optional[str] = ...,
-        adding_headers: Optional[Mapping[str, str]] = ...,
+        adding_headers: HeaderSet = ...,
         match_querystring: bool = ...,
-        match: List[Any] = ...,
+        match: MatcherIterable = ...,
     ) -> None: ...
 
 class _Upsert(Protocol):
@@ -248,12 +255,12 @@ class _Upsert(Protocol):
         body: _Body = ...,
         json: Optional[Any] = ...,
         status: int = ...,
-        headers: Optional[Mapping[str, str]] = ...,
+        headers: HeaderSet = ...,
         stream: bool = ...,
         content_type: Optional[str] = ...,
-        adding_headers: Optional[Mapping[str, str]] = ...,
+        adding_headers: HeaderSet = ...,
         match_querystring: bool = ...,
-        match: List[Any] = ...,
+        match: MatcherIterable = ...,
     ) -> None: ...
 
 class _Registered(Protocol):

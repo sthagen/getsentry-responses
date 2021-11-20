@@ -4,9 +4,10 @@ import json as json_module
 from requests import PreparedRequest
 
 if six.PY2:
-    from urlparse import parse_qsl
+    from urlparse import parse_qsl, urlparse
 else:
-    from urllib.parse import parse_qsl
+    from urllib.parse import parse_qsl, urlparse
+
 
 try:
     from requests.packages.urllib3.util.url import parse_url
@@ -117,6 +118,26 @@ def json_params_matcher(params):
     return match
 
 
+def fragment_identifier_matcher(identifier):
+    def match(request):
+        reason = ""
+        url_fragment = urlparse(request.url).fragment
+        if identifier:
+            url_fragment_qsl = sorted(parse_qsl(url_fragment))
+            identifier_qsl = sorted(parse_qsl(identifier))
+            valid = identifier_qsl == url_fragment_qsl
+        else:
+            valid = not url_fragment
+
+        if not valid:
+            reason = "URL fragment identifier is different: {} doesn't match {}".format(
+                identifier, url_fragment
+            )
+        return valid, reason
+
+    return match
+
+
 def query_param_matcher(params):
     """
     Matcher to match 'params' argument in request
@@ -154,14 +175,16 @@ def query_string_matcher(query):
     :param query: (str), same as constructed by request
     :return: (func) matcher
     """
+    if six.PY2 and isinstance(query, unicode):  # noqa: F821
+        query = query.encode("utf8")
 
     def match(request):
         reason = ""
         data = parse_url(request.url)
         request_query = data.query
 
-        request_qsl = sorted(parse_qsl(request_query))
-        matcher_qsl = sorted(parse_qsl(query))
+        request_qsl = sorted(parse_qsl(request_query)) if request_query else {}
+        matcher_qsl = sorted(parse_qsl(query)) if query else {}
 
         valid = not query if request_query is None else request_qsl == matcher_qsl
 
@@ -254,12 +277,12 @@ def multipart_matcher(files, data=None):
         )
 
         request_body = request.body
-        if isinstance(request_body, bytes):
-            request_body = request_body.decode("utf-8")
-
         prepared_body = prepared.body
+
         if isinstance(prepared_body, bytes):
-            prepared_body = prepared_body.decode("utf-8")
+            # since headers always come as str, need to convert to bytes
+            prepared_boundary = prepared_boundary.encode("utf-8")
+            request_boundary = request_boundary.encode("utf-8")
 
         prepared_body = prepared_body.replace(prepared_boundary, request_boundary)
 
