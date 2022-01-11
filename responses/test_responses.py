@@ -5,7 +5,6 @@ from __future__ import absolute_import, print_function, division, unicode_litera
 import inspect
 import os
 import re
-import six
 from io import BufferedReader, BytesIO
 
 import pytest
@@ -18,6 +17,7 @@ from responses import (
     PassthroughResponse,
     matchers,
     CallbackResponse,
+    registries,
 )
 
 
@@ -28,7 +28,7 @@ except ImportError:
 
 
 def assert_reset():
-    assert len(responses._default_mock._matches) == 0
+    assert len(responses._default_mock.registered()) == 0
     assert len(responses.calls) == 0
 
 
@@ -805,14 +805,10 @@ def test_activate_doesnt_change_signature():
         return (a, b)
 
     decorated_test_function = responses.activate(test_function)
-    if hasattr(inspect, "signature"):
-        assert inspect.signature(test_function) == inspect.signature(
-            decorated_test_function
-        )
-    else:
-        assert inspect.getargspec(test_function) == inspect.getargspec(
-            decorated_test_function
-        )
+    assert inspect.signature(test_function) == inspect.signature(
+        decorated_test_function
+    )
+
     assert decorated_test_function(1, 2) == test_function(1, 2)
     assert decorated_test_function(3) == test_function(3)
 
@@ -846,14 +842,9 @@ def test_activate_mock_interaction():
         return mock_stdout
 
     decorated_test_function = responses.activate(test_function)
-    if hasattr(inspect, "signature"):
-        assert inspect.signature(test_function) == inspect.signature(
-            decorated_test_function
-        )
-    else:
-        assert inspect.getargspec(test_function) == inspect.getargspec(
-            decorated_test_function
-        )
+    assert inspect.signature(test_function) == inspect.signature(
+        decorated_test_function
+    )
 
     value = test_function()
     assert isinstance(value, Mock)
@@ -862,7 +853,6 @@ def test_activate_mock_interaction():
     assert isinstance(value, Mock)
 
 
-@pytest.mark.skipif(six.PY2, reason="Cannot run in python2")
 def test_activate_doesnt_change_signature_with_return_type():
     def test_function(a, b=None):
         return a, b
@@ -1016,7 +1006,6 @@ def test_response_callback():
     assert_reset()
 
 
-@pytest.mark.skipif(six.PY2, reason="re.compile works differntly in PY2")
 def test_response_filebody():
     """ Adds the possibility to use actual (binary) files as responses """
 
@@ -1070,24 +1059,24 @@ def test_assert_all_requests_are_fired():
         # check that assert_all_requests_are_fired=True doesn't remove urls
         with responses.RequestsMock(assert_all_requests_are_fired=True) as m:
             m.add(responses.GET, "http://example.com", body=b"test")
-            assert len(m._matches) == 1
+            assert len(m.registered()) == 1
             requests.get("http://example.com")
-            assert len(m._matches) == 1
+            assert len(m.registered()) == 1
 
         # check that assert_all_requests_are_fired=True counts mocked errors
         with responses.RequestsMock(assert_all_requests_are_fired=True) as m:
             m.add(responses.GET, "http://example.com", body=Exception())
-            assert len(m._matches) == 1
+            assert len(m.registered()) == 1
             with pytest.raises(Exception):
                 requests.get("http://example.com")
-            assert len(m._matches) == 1
+            assert len(m.registered()) == 1
 
         with responses.RequestsMock(assert_all_requests_are_fired=True) as m:
             m.add_callback(responses.GET, "http://example.com", request_callback)
-            assert len(m._matches) == 1
+            assert len(m.registered()) == 1
             with pytest.raises(BaseException):
                 requests.get("http://example.com")
-            assert len(m._matches) == 1
+            assert len(m.registered()) == 1
 
     run()
     assert_reset()
@@ -1219,6 +1208,9 @@ def test_content_length_error(monkeypatch):
     https://github.com/psf/requests/pull/3563
 
     Now user can manually patch URL3 lib to achieve the same
+
+    See discussion in
+    https://github.com/getsentry/responses/issues/394
     """
 
     @responses.activate
@@ -1234,15 +1226,42 @@ def test_content_length_error(monkeypatch):
 
         assert "IncompleteRead" in str(exc.value)
 
-    original_init = getattr(requests.packages.urllib3.HTTPResponse, "__init__")
+    # Type errors here and on 1250 are ignored because the stubs for requests
+    # are off https://github.com/python/typeshed/blob/f8501d33c737482a829c6db557a0be26895c5941
+    #   /stubs/requests/requests/packages/__init__.pyi#L1
+    original_init = getattr(requests.packages.urllib3.HTTPResponse, "__init__")  # type: ignore
 
     def patched_init(self, *args, **kwargs):
         kwargs["enforce_content_length"] = True
         original_init(self, *args, **kwargs)
 
     monkeypatch.setattr(
-        requests.packages.urllib3.HTTPResponse, "__init__", patched_init
+        requests.packages.urllib3.HTTPResponse, "__init__", patched_init  # type: ignore
     )
+
+    run()
+    assert_reset()
+
+
+def test_stream_with_none_chunk_size():
+    """
+    See discussion in
+    https://github.com/getsentry/responses/issues/438
+    """
+
+    @responses.activate
+    def run():
+        responses.add(
+            responses.GET,
+            "https://example.com",
+            status=200,
+            content_type="application/octet-stream",
+            body=b"This is test",
+            auto_calculate_content_length=True,
+        )
+        res = requests.get("https://example.com", stream=True)
+        for chunk in res.iter_content(chunk_size=None):
+            assert chunk == b"This is test"
 
     run()
     assert_reset()
@@ -1377,14 +1396,47 @@ def test_multiple_responses():
     def run():
         responses.add(responses.GET, "http://example.com", body="test")
         responses.add(responses.GET, "http://example.com", body="rest")
+        responses.add(responses.GET, "http://example.com", body="fest")
+        responses.add(responses.GET, "http://example.com", body="best")
 
         resp = requests.get("http://example.com")
         assert_response(resp, "test")
+
         resp = requests.get("http://example.com")
         assert_response(resp, "rest")
+
+        resp = requests.get("http://example.com")
+        assert_response(resp, "fest")
+
+        resp = requests.get("http://example.com")
+        assert_response(resp, "best")
+
         # After all responses are used, last response should be repeated
         resp = requests.get("http://example.com")
+        assert_response(resp, "best")
+
+    run()
+    assert_reset()
+
+
+def test_multiple_responses_intermixed():
+    @responses.activate
+    def run():
+        responses.add(responses.GET, "http://example.com", body="test")
+        resp = requests.get("http://example.com")
+        assert_response(resp, "test")
+
+        responses.add(responses.GET, "http://example.com", body="rest")
+        resp = requests.get("http://example.com")
         assert_response(resp, "rest")
+
+        responses.add(responses.GET, "http://example.com", body="best")
+        resp = requests.get("http://example.com")
+        assert_response(resp, "best")
+
+        # After all responses are used, last response should be repeated
+        resp = requests.get("http://example.com")
+        assert_response(resp, "best")
 
     run()
     assert_reset()
@@ -1558,7 +1610,12 @@ def test_passthru_does_not_persist_across_tests(httpserver):
     def with_a_passthru():
         assert not responses._default_mock.passthru_prefixes
         responses.add_passthru(re.compile(".*"))
-        response = requests.get("https://example.com")
+        try:
+            response = requests.get("https://example.com")
+        except ConnectionError as err:  # pragma: no cover
+            if "Failed to establish" in str(err):  # pragma: no cover
+                pytest.skip("Cannot resolve DNS for example.com")  # pragma: no cover
+            raise err  # pragma: no cover
 
         assert response.status_code == 200
 
@@ -1793,7 +1850,7 @@ def test_mocked_responses_list_registered():
 
         mocks_list = responses.registered()
 
-        assert mocks_list == responses.mock._matches
+        assert mocks_list == responses.mock.registered()
         assert mocks_list == [first_response, second_response, third_response]
 
     run()
@@ -1815,6 +1872,89 @@ def test_rfc_compliance(url, other_url):
         responses.add(method=responses.GET, url=url)
         resp = requests.request("GET", other_url)
         assert_response(resp, "")
+
+    run()
+    assert_reset()
+
+
+def test_set_registry_not_empty():
+    class CustomRegistry(registries.FirstMatchRegistry):
+        pass
+
+    @responses.activate
+    def run():
+        url = "http://fizzbuzz/foo"
+        responses.add(method=responses.GET, url=url)
+        with pytest.raises(AttributeError) as excinfo:
+            responses.mock._set_registry(CustomRegistry)
+        msg = str(excinfo.value)
+        assert "Cannot replace Registry, current registry has responses" in msg
+
+    run()
+    assert_reset()
+
+
+def test_set_registry():
+    class CustomRegistry(registries.FirstMatchRegistry):
+        pass
+
+    @responses.activate(registry=CustomRegistry)
+    def run_with_registry():
+        assert type(responses.mock._get_registry()) == CustomRegistry
+
+    @responses.activate
+    def run():
+        # test that registry does not leak to another test
+        assert type(responses.mock._get_registry()) == registries.FirstMatchRegistry
+
+    run_with_registry()
+    run()
+    assert_reset()
+
+
+def test_set_registry_context_manager():
+    def run():
+        class CustomRegistry(registries.FirstMatchRegistry):
+            pass
+
+        with responses.RequestsMock(
+            assert_all_requests_are_fired=False, registry=CustomRegistry
+        ) as rsps:
+            assert type(rsps._get_registry()) == CustomRegistry
+            assert type(responses.mock._get_registry()) == registries.FirstMatchRegistry
+
+    run()
+    assert_reset()
+
+
+def test_registry_reset():
+    def run():
+        class CustomRegistry(registries.FirstMatchRegistry):
+            pass
+
+        with responses.RequestsMock(
+            assert_all_requests_are_fired=False, registry=CustomRegistry
+        ) as rsps:
+            rsps._get_registry().reset()
+            assert not rsps.registered()
+
+    run()
+    assert_reset()
+
+
+def test_requests_between_add():
+    @responses.activate
+    def run():
+        responses.add(responses.GET, "https://example.com/", json={"response": "old"})
+        assert requests.get("https://example.com/").content == b'{"response": "old"}'
+        assert requests.get("https://example.com/").content == b'{"response": "old"}'
+        assert requests.get("https://example.com/").content == b'{"response": "old"}'
+
+        responses.add(responses.GET, "https://example.com/", json={"response": "new"})
+
+        assert requests.get("https://example.com/").content == b'{"response": "new"}'
+        assert requests.get("https://example.com/").content == b'{"response": "new"}'
+        assert requests.get("https://example.com/").content == b'{"response": "new"}'
 
     run()
     assert_reset()

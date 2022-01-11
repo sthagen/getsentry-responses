@@ -14,7 +14,13 @@ A utility library for mocking out the ``requests`` Python library.
 
 ..  note::
 
-    Responses requires Python 2.7 or newer, and requests >= 2.0
+    Responses requires Python 3.7 or newer, and requests >= 2.0
+
+
+Table of Contents
+----------
+
+.. contents::
 
 
 Installing
@@ -102,8 +108,8 @@ url (``str`` or compiled regular expression)
     The full resource URL.
 
 match_querystring (``bool``)
-    DEPRECATED: Use `responses.matchers.query_param_matcher` or
-    `responses.matchers.query_string_matcher`
+    DEPRECATED: Use ``responses.matchers.query_param_matcher`` or
+    ``responses.matchers.query_string_matcher``
 
     Include the query string when matching requests.
     Enabled by default if the response URL contains a query string,
@@ -270,7 +276,7 @@ to the request:
         req_files = {"file_name": b"Old World!"}
         responses.add(
             responses.POST, url="http://httpbin.org/post",
-            match=[multipart_matcher(req_data, req_files)]
+            match=[multipart_matcher(req_files, data=req_data)]
         )
         resp = requests.post("http://httpbin.org/post", files={"file_name": b"New World!"})
 
@@ -386,6 +392,49 @@ include any additional headers.
 
         resp = session.send(prepped)
         assert resp.text == "hello world"
+
+Response Registry
+---------------------------
+
+By default, ``responses`` will search all registered ``Response`` objects and
+return a match. If only one ``Response`` is registered, the registry is kept unchanged.
+However, if multiple matches are found for the same request, then first match is returned and
+removed from registry.
+
+Such behavior is suitable for most of use cases, but to handle special conditions, you can
+implement custom registry which must follow interface of ``registries.FirstMatchRegistry``.
+Redefining the ``find`` method will allow you to create custom search logic and return
+appropriate ``Response``
+
+Example that shows how to set custom registry
+
+.. code-block:: python
+
+    import responses
+    from responses import registries
+
+
+    class CustomRegistry(registries.FirstMatchRegistry):
+        pass
+
+
+    """ Before tests: <responses.registries.FirstMatchRegistry object> """
+
+    # using function decorator
+    @responses.activate(registry=CustomRegistry)
+    def run():
+        """ Within test: <__main__.CustomRegistry object> """
+
+    run()
+    """ After test: <responses.registries.FirstMatchRegistry object> """
+
+    # using context manager
+    with responses.RequestsMock(registry=CustomRegistry) as rsps:
+        """ In context manager: <__main__.CustomRegistry object> """
+
+    """
+    After exit from context manager: <responses.registries.FirstMatchRegistry object>
+    """
 
 Dynamic Responses
 -----------------
@@ -566,22 +615,26 @@ generic class-level responses, that may be complemented by each test
 
 .. code-block:: python
 
-    def setUp():
-        self.responses = responses.RequestsMock()
-        self.responses.start()
+    class TestMyApi(unittest.TestCase):
+        def setUp(self):
+            responses.add(responses.GET, 'https://example.com', body="within setup")
+            # here go other self.responses.add(...)
 
-        # self.responses.add(...)
+        @responses.activate
+        def test_my_func(self):
+            responses.add(
+                responses.GET,
+                "https://httpbin.org/get",
+                match=[matchers.query_param_matcher({"test": "1", "didi": "pro"})],
+                body="within test"
+            )
+            resp = requests.get("https://example.com")
+            resp2 = requests.get("https://httpbin.org/get", params={"test": "1", "didi": "pro"})
+            print(resp.text)
+            # >>> within setup
+            print(resp2.text)
+            # >>> within test
 
-        self.addCleanup(self.responses.stop)
-        self.addCleanup(self.responses.reset)
-
-    def test_api(self):
-        self.responses.add(
-            responses.GET, 'http://twitter.com/api/1/foobar',
-            body='{}', status=200,
-            content_type='application/json')
-        resp = requests.get('http://twitter.com/api/1/foobar')
-        assert resp.status_code == 200
 
 Assertions on declared responses
 --------------------------------
@@ -754,6 +807,9 @@ Finally, ``reset`` will reset all registered responses.
 Contributing
 ------------
 
+Environment Configuration
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
 Responses uses several linting and autoformatting utilities, so it's important that when
 submitting patches you use the appropriate toolchain:
 
@@ -775,8 +831,39 @@ Configure development requirements:
 
     make develop
 
+
+Tests and Code Quality Validation
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The easiest way to validate your code is to run tests via ``tox``.
+Current ``tox`` configuration runs the same checks that are used in
+GitHub Actions CI/CD pipeline.
+
+Please execute the following command line from the project root to validate
+your code against:
+
+* Unit tests in all Python versions that are supported by this project
+* Type validation via ``mypy``
+* All ``pre-commit`` hooks
+
+.. code-block:: shell
+
+    tox
+
+Alternatively, you can always run a single test. See documentation below.
+
+Unit tests
+"""""""""
+
 Responses uses `Pytest <https://docs.pytest.org/en/latest/>`_ for
 testing. You can run all tests by:
+
+.. code-block:: shell
+
+    tox -e py37
+    tox -e py310
+
+OR manually activate required version of Python and run
 
 .. code-block:: shell
 
@@ -788,13 +875,31 @@ And run a single test by:
 
     pytest -k '<test_function_name>'
 
+Type Validation
+"""""""""""""""
+
 To verify ``type`` compliance, run `mypy <https://github.com/python/mypy>`_ linter:
+
+.. code-block:: shell
+
+    tox -e mypy
+
+OR
 
 .. code-block:: shell
 
     mypy --config-file=./mypy.ini -p responses
 
+Code Quality and Style
+""""""""""""""""""""""
+
 To check code style and reformat it run:
+
+.. code-block:: shell
+
+    tox -e precom
+
+OR
 
 .. code-block:: shell
 

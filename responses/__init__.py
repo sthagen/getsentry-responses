@@ -1,13 +1,14 @@
 from __future__ import absolute_import, print_function, division, unicode_literals
 
 import _io
+from http import client
+from http import cookies
 import inspect
 import json as json_module
 import logging
 import re
 from itertools import groupby
 
-import six
 
 from collections import namedtuple
 from functools import update_wrapper
@@ -16,13 +17,11 @@ from requests.exceptions import ConnectionError
 from requests.utils import cookiejar_from_dict
 from responses.matchers import json_params_matcher as _json_params_matcher
 from responses.matchers import urlencoded_params_matcher as _urlencoded_params_matcher
+from responses.registries import FirstMatchRegistry
 from responses.matchers import query_string_matcher as _query_string_matcher
 from warnings import warn
 
-try:
-    from collections.abc import Sequence, Sized
-except ImportError:
-    from collections import Sequence, Sized
+from collections.abc import Sequence, Sized
 
 try:
     from requests.packages.urllib3.response import HTTPResponse
@@ -37,37 +36,22 @@ try:
 except ImportError:  # pragma: no cover
     from urllib3.util.url import parse_url  # pragma: no cover
 
-if six.PY2:
-    from urlparse import urlparse, urlunparse, parse_qsl, urlsplit, urlunsplit
-    from urllib import quote
-else:
-    from urllib.parse import (
-        urlparse,
-        urlunparse,
-        parse_qsl,
-        urlsplit,
-        urlunsplit,
-        quote,
-    )
 
-if six.PY2:
-    try:
-        from six import cStringIO as BufferIO
-    except ImportError:
-        from six import StringIO as BufferIO
-else:
-    from io import BytesIO as BufferIO
+from urllib.parse import (
+    urlparse,
+    urlunparse,
+    parse_qsl,
+    urlsplit,
+    urlunsplit,
+    quote,
+)
 
-try:
-    from unittest import mock as std_mock
-except ImportError:
-    import mock as std_mock
+from io import BytesIO as BufferIO
 
-try:
-    Pattern = re._pattern_type
-except AttributeError:
-    # Python 3.7
-    Pattern = re.Pattern
+from unittest import mock as std_mock
+
+
+Pattern = re.Pattern
 
 UNSET = object()
 
@@ -95,7 +79,7 @@ def json_params_matcher(params):
 
 
 def _is_string(s):
-    return isinstance(s, six.string_types)
+    return isinstance(s, str)
 
 
 def _has_unicode(s):
@@ -116,8 +100,6 @@ def _clean_unicode(url):
         url = urlunsplit(urllist)
 
     # Clean up path/query/params, which use url-encoding to handle unicode chars
-    if isinstance(url.encode("utf8"), six.string_types):
-        url = url.encode("utf8")
     chars = list(url)
     for i, x in enumerate(chars):
         if ord(x) > 128:
@@ -127,26 +109,14 @@ def _clean_unicode(url):
 
 
 def _ensure_str(s):
-    if six.PY2:
-        s = s.encode("utf-8") if isinstance(s, six.text_type) else s
     return s
 
 
 def _cookies_from_headers(headers):
-    try:
-        import http.cookies as _cookies
+    resp_cookie = cookies.SimpleCookie()
+    resp_cookie.load(headers["set-cookie"])
+    cookies_dict = {name: v.value for name, v in resp_cookie.items()}
 
-        resp_cookie = _cookies.SimpleCookie()
-        resp_cookie.load(headers["set-cookie"])
-
-        cookies_dict = {name: v.value for name, v in resp_cookie.items()}
-    except (ImportError, AttributeError):
-        from cookies import Cookies
-
-        resp_cookies = Cookies.from_request(_ensure_str(headers["set-cookie"]))
-        cookies_dict = {
-            v.name: quote(_ensure_str(v.value)) for _, v in resp_cookies.items()
-        }
     return cookiejar_from_dict(cookies_dict)
 
 
@@ -157,45 +127,40 @@ def wrapper%(wrapper_args)s:
 """
 
 
-def get_wrapped(func, responses):
-    if six.PY2:
-        args, a, kw, defaults = inspect.getargspec(func)
-        wrapper_args = inspect.formatargspec(args, a, kw, defaults)
-
-        # Preserve the argspec for the wrapped function so that testing
-        # tools such as pytest can continue to use their fixture injection.
-        func_args = inspect.formatargspec(args, a, kw, None)
+def get_wrapped(func, responses, registry=None):
+    signature = inspect.signature(func)
+    signature = signature.replace(return_annotation=inspect.Signature.empty)
+    # If the function is wrapped, switch to *args, **kwargs for the parameters
+    # as we can't rely on the signature to give us the arguments the function will
+    # be called with. For example unittest.mock.patch uses required args that are
+    # not actually passed to the function when invoked.
+    if hasattr(func, "__wrapped__"):
+        wrapper_params = [
+            inspect.Parameter("args", inspect.Parameter.VAR_POSITIONAL),
+            inspect.Parameter("kwargs", inspect.Parameter.VAR_KEYWORD),
+        ]
     else:
-        signature = inspect.signature(func)
-        signature = signature.replace(return_annotation=inspect.Signature.empty)
-        # If the function is wrapped, switch to *args, **kwargs for the parameters
-        # as we can't rely on the signature to give us the arguments the function will
-        # be called with. For example unittest.mock.patch uses required args that are
-        # not actually passed to the function when invoked.
-        if hasattr(func, "__wrapped__"):
-            wrapper_params = [
-                inspect.Parameter("args", inspect.Parameter.VAR_POSITIONAL),
-                inspect.Parameter("kwargs", inspect.Parameter.VAR_KEYWORD),
-            ]
-        else:
-            wrapper_params = [
-                param.replace(annotation=inspect.Parameter.empty)
-                for param in signature.parameters.values()
-            ]
-        signature = signature.replace(parameters=wrapper_params)
-
-        wrapper_args = str(signature)
-        params_without_defaults = [
-            param.replace(
-                annotation=inspect.Parameter.empty, default=inspect.Parameter.empty
-            )
+        wrapper_params = [
+            param.replace(annotation=inspect.Parameter.empty)
             for param in signature.parameters.values()
         ]
-        signature = signature.replace(parameters=params_without_defaults)
-        func_args = str(signature)
+    signature = signature.replace(parameters=wrapper_params)
+
+    wrapper_args = str(signature)
+    params_without_defaults = [
+        param.replace(
+            annotation=inspect.Parameter.empty, default=inspect.Parameter.empty
+        )
+        for param in signature.parameters.values()
+    ]
+    signature = signature.replace(parameters=params_without_defaults)
+    func_args = str(signature)
+
+    if registry is not None:
+        responses._set_registry(registry)
 
     evaldict = {"func": func, "responses": responses}
-    six.exec_(
+    exec(
         _wrapper_template % {"wrapper_args": wrapper_args, "func_args": func_args},
         evaldict,
     )
@@ -242,12 +207,40 @@ def _get_url_and_path(url):
 
 
 def _handle_body(body):
-    if isinstance(body, six.text_type):
+    if isinstance(body, str):
         body = body.encode("utf-8")
     if isinstance(body, _io.BufferedReader):
         return body
 
-    return BufferIO(body)
+    data = BufferIO(body)
+
+    def is_closed():
+        """
+        Real Response uses HTTPResponse as body object.
+        Thus, when method is_closed is called first to check if there is any more
+        content to consume and the file-like object is still opened
+
+        This method ensures stability to work for both:
+        https://github.com/getsentry/responses/issues/438
+        https://github.com/getsentry/responses/issues/394
+
+        where file should be intentionally be left opened to continue consumption
+        """
+        if not data.closed and data.read(1):
+            # if there is more bytes to read then keep open, but return pointer
+            data.seek(-1, 1)
+            return False
+        else:
+            if not data.closed:
+                # close but return False to mock like is still opened
+                data.close()
+                return False
+
+            # only if file really closed (by us) return True
+            return True
+
+    data.isclosed = is_closed
+    return data
 
 
 class BaseResponse(object):
@@ -308,8 +301,6 @@ class BaseResponse(object):
         if _is_string(url):
             if _has_unicode(url):
                 url = _clean_unicode(url)
-                if not isinstance(other, six.text_type):
-                    other = other.encode("ascii").decode("utf8")
 
             return _get_url_and_path(url) == _get_url_and_path(other)
 
@@ -376,7 +367,7 @@ class Response(BaseResponse):
                 content_type = "application/json"
 
         if content_type is UNSET:
-            if isinstance(body, six.text_type) and _has_unicode(body):
+            if isinstance(body, str) and _has_unicode(body):
                 content_type = "text/plain; charset=utf-8"
             else:
                 content_type = "text/plain"
@@ -414,7 +405,7 @@ class Response(BaseResponse):
 
         return HTTPResponse(
             status=status,
-            reason=six.moves.http_client.responses.get(status),
+            reason=client.responses.get(status, None),
             body=body,
             headers=headers,
             original_response=OriginalResponseShim(headers),
@@ -477,7 +468,7 @@ class CallbackResponse(BaseResponse):
 
         return HTTPResponse(
             status=status,
-            reason=six.moves.http_client.responses.get(status),
+            reason=client.responses.get(status, None),
             body=body,
             headers=headers,
             original_response=OriginalResponseShim(headers),
@@ -528,16 +519,33 @@ class RequestsMock(object):
         response_callback=None,
         passthru_prefixes=(),
         target="requests.adapters.HTTPAdapter.send",
+        registry=FirstMatchRegistry,
     ):
         self._calls = CallList()
         self.reset()
+        self._registry = registry()  # call only after reset
         self.assert_all_requests_are_fired = assert_all_requests_are_fired
         self.response_callback = response_callback
         self.passthru_prefixes = tuple(passthru_prefixes)
         self.target = target
+        self._patcher = None
+        self._matches = []
+
+    def _get_registry(self):
+        return self._registry
+
+    def _set_registry(self, new_registry):
+        if self.registered():
+            err_msg = (
+                "Cannot replace Registry, current registry has responses.\n"
+                "Run 'responses.registry.reset()' first"
+            )
+            raise AttributeError(err_msg)
+
+        self._registry = new_registry()
 
     def reset(self):
-        self._matches = []
+        self._registry = FirstMatchRegistry()
         self._calls.reset()
         self.passthru_prefixes = ()
 
@@ -551,8 +559,9 @@ class RequestsMock(object):
         **kwargs
     ):
         """
-        A basic request:
+        >>> import responses
 
+        A basic request:
         >>> responses.add(responses.GET, 'http://example.com')
 
         You can also directly pass an object which implements the
@@ -578,13 +587,13 @@ class RequestsMock(object):
 
         """
         if isinstance(method, BaseResponse):
-            self._matches.append(method)
+            self._registry.add(method)
             return
 
         if adding_headers is not None:
             kwargs.setdefault("headers", adding_headers)
 
-        self._matches.append(Response(method=method, url=url, body=body, **kwargs))
+        self._registry.add(Response(method=method, url=url, body=body, **kwargs))
 
     def add_passthru(self, prefix):
         """
@@ -593,6 +602,7 @@ class RequestsMock(object):
         For example, to allow any request to 'https://example.com', but require
         mocks for the remainder, you would add the prefix as so:
 
+        >>> import responses
         >>> responses.add_passthru('https://example.com')
 
         Regex can be used like:
@@ -609,16 +619,16 @@ class RequestsMock(object):
         either by a response object inheriting ``BaseResponse`` or
         ``method`` and ``url``. Removes all matching responses.
 
-        >>> response.add(responses.GET, 'http://example.org')
-        >>> response.remove(responses.GET, 'http://example.org')
+        >>> import responses
+        >>> responses.add(responses.GET, 'http://example.org')
+        >>> responses.remove(responses.GET, 'http://example.org')
         """
         if isinstance(method_or_response, BaseResponse):
             response = method_or_response
         else:
             response = BaseResponse(method=method_or_response, url=url)
 
-        while response in self._matches:
-            self._matches.remove(response)
+        self._registry.remove(response)
 
     def replace(self, method_or_response=None, url=None, body="", *args, **kwargs):
         """
@@ -626,6 +636,7 @@ class RequestsMock(object):
         is identical to ``add()``. The response is identified using ``method``
         and ``url``, and the first matching response is replaced.
 
+        >>> import responses
         >>> responses.add(responses.GET, 'http://example.org', json={'data': 1})
         >>> responses.replace(responses.GET, 'http://example.org', json={'data': 2})
         """
@@ -635,11 +646,7 @@ class RequestsMock(object):
         else:
             response = Response(method=method_or_response, url=url, body=body, **kwargs)
 
-        try:
-            index = self._matches.index(response)
-        except ValueError:
-            raise ValueError("Response is not registered for URL %s" % url)
-        self._matches[index] = response
+        self._registry.replace(response)
 
     def upsert(self, method_or_response=None, url=None, body="", *args, **kwargs):
         """
@@ -647,6 +654,7 @@ class RequestsMock(object):
         if no response exists.  Responses are matched using ``method``and ``url``.
         The first matching response is replaced.
 
+        >>> import responses
         >>> responses.add(responses.GET, 'http://example.org', json={'data': 1})
         >>> responses.upsert(responses.GET, 'http://example.org', json={'data': 2})
         """
@@ -667,7 +675,7 @@ class RequestsMock(object):
         # ensure the url has a default path set if the url is a string
         # url = _ensure_url_default_path(url, match_querystring)
 
-        self._matches.append(
+        self._registry.add(
             CallbackResponse(
                 url=url,
                 method=method,
@@ -679,7 +687,7 @@ class RequestsMock(object):
         )
 
     def registered(self):
-        return self._matches
+        return self._registry.registered
 
     @property
     def calls(self):
@@ -695,8 +703,14 @@ class RequestsMock(object):
         self.reset()
         return success
 
-    def activate(self, func):
-        return get_wrapped(func, self)
+    def activate(self, func=None, registry=None):
+        if func is not None:
+            return get_wrapped(func, self)
+
+        def deco_activate(func):
+            return get_wrapped(func, self, registry)
+
+        return deco_activate
 
     def _find_match(self, request):
         """
@@ -707,21 +721,7 @@ class RequestsMock(object):
             (Response) found match. If multiple found, then remove & return the first match.
             (list) list with reasons why other matches don't match
         """
-        found = None
-        found_match = None
-        match_failed_reasons = []
-        for i, match in enumerate(self._matches):
-            match_result, reason = match.matches(request)
-            if match_result:
-                if found is None:
-                    found = i
-                    found_match = match
-                else:
-                    # Multiple matches found.  Remove & return the first match.
-                    return self._matches.pop(found), match_failed_reasons
-            else:
-                match_failed_reasons.append(reason)
-        return found_match, match_failed_reasons
+        return self._registry.find(request)
 
     def _parse_request_params(self, url):
         params = {}
@@ -760,7 +760,7 @@ class RequestsMock(object):
                 "- %s %s\n\n"
                 "Available matches:\n" % (request.method, request.url)
             )
-            for i, m in enumerate(self._matches):
+            for i, m in enumerate(self.registered()):
                 error_msg += "- {} {} {}\n".format(
                     m.method, m.url, match_failed_reasons[i]
                 )
@@ -784,11 +784,6 @@ class RequestsMock(object):
                 response = resp_callback(response) if resp_callback else response
                 raise
 
-        stream = kwargs.get("stream")
-        if not stream:
-            response.content  # NOQA required to ensure that response body is read.
-            response.close()
-
         response = resp_callback(response) if resp_callback else response
         match.call_count += 1
         self._calls.add(request, response)
@@ -809,7 +804,7 @@ class RequestsMock(object):
         if not allow_assert:
             return
 
-        not_called = [m for m in self._matches if m.call_count == 0]
+        not_called = [m for m in self.registered() if m.call_count == 0]
         if not_called:
             raise AssertionError(
                 "Not all requests have been executed {0!r}".format(
