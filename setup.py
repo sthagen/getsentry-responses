@@ -20,7 +20,7 @@ if "test" in sys.argv:
     setup_requires.append("pytest")
 
 install_requires = [
-    "requests>=2.0",
+    "requests>=2.0,<3.0",
     "urllib3>=1.25.10",
 ]
 
@@ -28,6 +28,7 @@ tests_require = [
     "pytest>=4.6",
     "coverage >= 6.0.0",
     "pytest-cov",
+    "pytest-asyncio",
     "pytest-localserver",
     "flake8",
     "types-mock",
@@ -54,7 +55,7 @@ class PyTest(TestCommand):
 
 setup(
     name="responses",
-    version="0.17.0",
+    version="0.18.0",
     author="David Cramer",
     description=("A utility library for mocking out the `requests` Python library."),
     url="https://github.com/getsentry/responses",
