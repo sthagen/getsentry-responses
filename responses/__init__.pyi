@@ -1,33 +1,36 @@
-from collections import Sequence, Sized
-from typing import (
-    Any,
-    Callable,
-    Iterator,
-    Mapping,
-    Optional,
-    NamedTuple,
-    Protocol,
-    TypeVar,
-    Dict,
-    List,
-    Tuple,
-    Union,
-    Iterable,
-    overload,
-    Type
-)
-
-from io import BufferedReader, BytesIO
+from collections import Sequence
+from collections import Sized
+from io import BufferedReader
+from io import BytesIO
 from re import Pattern
-from requests.adapters import HTTPResponse, PreparedRequest
-from requests.cookies import RequestsCookieJar
-from typing_extensions import Literal
+from typing import Any
+from typing import Callable
+from typing import Dict
+from typing import Iterable
+from typing import Iterator
+from typing import List
+from typing import Mapping
+from typing import NamedTuple
+from typing import Optional
+from typing import Protocol
+from typing import Tuple
+from typing import Type
+from typing import TypeVar
+from typing import Union
+from typing import overload
 from unittest import mock as std_mock
 from urllib.parse import quote as quote
-from urllib3.response import HTTPHeaderDict # type: ignore # Not currently exposed in typestubs.
 
-from .matchers import urlencoded_params_matcher, json_params_matcher
+from requests.adapters import HTTPResponse
+from requests.adapters import PreparedRequest
+from requests.cookies import RequestsCookieJar
+from typing_extensions import Literal
 
+# Not currently exposed in typestubs, thus, ignore
+from urllib3.response import HTTPHeaderDict  # type: ignore
+
+from .matchers import json_params_matcher
+from .matchers import urlencoded_params_matcher
 
 def _clean_unicode(url: str) -> str: ...
 def _cookies_from_headers(headers: Dict[str, str]) -> RequestsCookieJar: ...
@@ -182,6 +185,13 @@ class RequestsMock:
         ...
     def reset(self) -> None: ...
     add: _Add
+    delete: _Shortcut
+    get: _Shortcut
+    head: _Shortcut
+    options: _Shortcut
+    patch: _Shortcut
+    post: _Shortcut
+    put: _Shortcut
     add_passthru: _AddPassthru
     def remove(
         self,
@@ -210,6 +220,22 @@ class _Add(Protocol):
     def __call__(
         self,
         method: Optional[Union[str, BaseResponse]] = ...,
+        url: Optional[Union[Pattern[str], str]] = ...,
+        body: _Body = ...,
+        json: Optional[Any] = ...,
+        status: int = ...,
+        headers: HeaderSet = ...,
+        stream: bool = ...,
+        content_type: Optional[str] = ...,
+        auto_calculate_content_length: bool = ...,
+        adding_headers: HeaderSet = ...,
+        match_querystring: bool = ...,
+        match: MatcherIterable = ...,
+    ) -> None: ...
+
+class _Shortcut(Protocol):
+    def __call__(
+        self,
         url: Optional[Union[Pattern[str], str]] = ...,
         body: _Body = ...,
         json: Optional[Any] = ...,
@@ -301,15 +327,22 @@ add_passthru: _AddPassthru
 assert_all_requests_are_fired: bool
 assert_call_count: Callable[[str, int], bool]
 calls: CallList
+delete: _Shortcut
 DELETE: Literal["DELETE"]
+get: _Shortcut
 GET: Literal["GET"]
+head: _Shortcut
 HEAD: Literal["HEAD"]
 mock: RequestsMock
 _default_mock: RequestsMock
+options: _Shortcut
 OPTIONS: Literal["OPTIONS"]
 passthru_prefixes: Tuple[str, ...]
+patch: _Shortcut
 PATCH: Literal["PATCH"]
+post: _Shortcut
 POST: Literal["POST"]
+put: _Shortcut
 PUT: Literal["PUT"]
 registered: _Registered
 remove: _Remove
@@ -333,13 +366,20 @@ __all__ = [
     "assert_all_requests_are_fired",
     "assert_call_count",
     "calls",
+    "delete",
     "DELETE",
+    "get",
     "GET",
+    "head",
     "HEAD",
+    "options",
     "OPTIONS",
     "passthru_prefixes",
+    "patch",
     "PATCH",
+    "post",
     "POST",
+    "put",
     "PUT",
     "registered",
     "remove",

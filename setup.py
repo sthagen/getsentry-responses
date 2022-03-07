@@ -25,7 +25,7 @@ install_requires = [
 ]
 
 tests_require = [
-    "pytest>=4.6",
+    "pytest>=7.0.0",
     "coverage >= 6.0.0",
     "pytest-cov",
     "pytest-asyncio",
@@ -55,7 +55,7 @@ class PyTest(TestCommand):
 
 setup(
     name="responses",
-    version="0.18.0",
+    version="0.19.0",
     author="David Cramer",
     description=("A utility library for mocking out the `requests` Python library."),
     url="https://github.com/getsentry/responses",

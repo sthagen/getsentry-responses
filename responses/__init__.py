@@ -1,25 +1,24 @@
-from http import client
-
 import inspect
-from http import cookies
 import json as json_module
 import logging
+from collections import namedtuple
+from collections.abc import Sequence
+from collections.abc import Sized
+from functools import wraps
+from http import client
+from http import cookies
 from itertools import groupby
 from re import Pattern
+from warnings import warn
 
-
-from collections import namedtuple
-from functools import wraps
 from requests.adapters import HTTPAdapter
 from requests.exceptions import ConnectionError
 from requests.utils import cookiejar_from_dict
+
 from responses.matchers import json_params_matcher as _json_params_matcher
+from responses.matchers import query_string_matcher as _query_string_matcher
 from responses.matchers import urlencoded_params_matcher as _urlencoded_params_matcher
 from responses.registries import FirstMatchRegistry
-from responses.matchers import query_string_matcher as _query_string_matcher
-from warnings import warn
-
-from collections.abc import Sequence, Sized
 
 try:
     from requests.packages.urllib3.response import HTTPResponse
@@ -34,20 +33,14 @@ try:
 except ImportError:  # pragma: no cover
     from urllib3.util.url import parse_url  # pragma: no cover
 
-
-from urllib.parse import (
-    urlparse,
-    urlunparse,
-    parse_qsl,
-    urlsplit,
-    urlunsplit,
-    quote,
-)
-
-from io import BytesIO
 from io import BufferedReader
-
+from io import BytesIO
 from unittest import mock as std_mock
+from urllib.parse import parse_qsl
+from urllib.parse import quote
+from urllib.parse import urlsplit
+from urllib.parse import urlunparse
+from urllib.parse import urlunsplit
 
 Call = namedtuple("Call", ["request", "response"])
 _real_send = HTTPAdapter.send
@@ -57,8 +50,12 @@ logger = logging.getLogger("responses")
 
 
 class FalseBool:
-    # used for backwards compatibility, see
-    # https://github.com/getsentry/responses/issues/464
+    """Class to mock up built-in False boolean.
+
+    Used for backwards compatibility, see
+    https://github.com/getsentry/responses/issues/464
+    """
+
     def __bool__(self):
         return False
 
@@ -86,7 +83,21 @@ def _has_unicode(s):
 
 
 def _clean_unicode(url):
-    # Clean up domain names, which use punycode to handle unicode chars
+    """Clean up URLs, which use punycode to handle unicode chars.
+
+    Applies percent encoding to URL path and query if required.
+
+    Parameters
+    ----------
+    url : str
+        URL that should be cleaned from unicode
+
+    Returns
+    -------
+    str
+        Cleaned URL
+
+    """
     urllist = list(urlsplit(url))
     netloc = urllist[1]
     if _has_unicode(netloc):
@@ -108,6 +119,21 @@ def _clean_unicode(url):
 
 
 def _cookies_from_headers(headers):
+    """Create Cookies from request Headers.
+
+    Converts ``set-cookie`` headers to real cookies.
+
+    Parameters
+    ----------
+    headers : dict
+        Request headers.
+
+    Returns
+    -------
+    CookieJar
+        CookieJar request object.
+
+    """
     resp_cookie = cookies.SimpleCookie()
     resp_cookie.load(headers["set-cookie"])
     cookies_dict = {name: v.value for name, v in resp_cookie.items()}
@@ -116,6 +142,26 @@ def _cookies_from_headers(headers):
 
 
 def get_wrapped(func, responses, registry=None):
+    """Wrap provided function inside ``responses`` context manager.
+
+    Provides a synchronous or asynchronous wrapper for the function.
+
+
+    Parameters
+    ----------
+    func : Callable
+        Function to wrap.
+    responses : RequestsMock
+        Mock object that is used as context manager.
+    registry : FirstMatchRegistry, optional
+        Custom registry that should be applied. See ``responses.registries``
+
+    Returns
+    -------
+    Callable
+        Wrapped function
+
+    """
     if registry is not None:
         responses._set_registry(registry)
 
@@ -166,7 +212,7 @@ def _ensure_url_default_path(url):
 
 
 def _get_url_and_path(url):
-    url_parsed = urlparse(url)
+    url_parsed = urlsplit(url)
     url_and_path = urlunparse(
         [url_parsed.scheme, url_parsed.netloc, url_parsed.path, None, None, None]
     )
@@ -222,7 +268,7 @@ class BaseResponse(object):
         self.url = _ensure_url_default_path(url)
 
         if self._should_match_querystring(match_querystring):
-            match = tuple(match) + (_query_string_matcher(urlparse(self.url).query),)
+            match = tuple(match) + (_query_string_matcher(urlsplit(self.url).query),)
 
         self.match = match
         self.call_count = 0
@@ -262,7 +308,7 @@ class BaseResponse(object):
                 )
             return match_querystring_argument
 
-        return bool(urlparse(self.url).query)
+        return bool(urlsplit(self.url).query)
 
     def _url_matches(self, url, other):
         if isinstance(url, str):
@@ -514,6 +560,7 @@ class RequestsMock(object):
         self._registry = FirstMatchRegistry()
         self._calls.reset()
         self.passthru_prefixes = ()
+        self._patcher = None
 
     def add(
         self,
@@ -567,6 +614,27 @@ class RequestsMock(object):
                 )
 
         self._registry.add(Response(method=method, url=url, body=body, **kwargs))
+
+    def delete(self, *args, **kwargs):
+        self.add(DELETE, *args, **kwargs)
+
+    def get(self, *args, **kwargs):
+        self.add(GET, *args, **kwargs)
+
+    def head(self, *args, **kwargs):
+        self.add(HEAD, *args, **kwargs)
+
+    def options(self, *args, **kwargs):
+        self.add(OPTIONS, *args, **kwargs)
+
+    def patch(self, *args, **kwargs):
+        self.add(PATCH, *args, **kwargs)
+
+    def post(self, *args, **kwargs):
+        self.add(POST, *args, **kwargs)
+
+    def put(self, *args, **kwargs):
+        self.add(PUT, *args, **kwargs)
 
     def add_passthru(self, prefix):
         """
@@ -696,7 +764,7 @@ class RequestsMock(object):
 
     def _parse_request_params(self, url):
         params = {}
-        for key, val in groupby(parse_qsl(urlparse(url).query), lambda kv: kv[0]):
+        for key, val in groupby(parse_qsl(urlsplit(url).query), lambda kv: kv[0]):
             values = list(map(lambda x: x[1], val))
             if len(values) == 1:
                 values = values[0]
@@ -736,6 +804,11 @@ class RequestsMock(object):
                     m.method, m.url, match_failed_reasons[i]
                 )
 
+            if self.passthru_prefixes:
+                error_msg += "Passthru prefixes:\n"
+                for p in self.passthru_prefixes:
+                    error_msg += "- {}\n".format(p)
+
             response = ConnectionError(error_msg)
             response.request = request
 
@@ -759,6 +832,10 @@ class RequestsMock(object):
         return response
 
     def start(self):
+        if self._patcher:
+            # we must not override value of the _patcher if already applied
+            return
+
         def unbound_on_send(adapter, request, *a, **kwargs):
             return self._on_request(adapter, request, *a, **kwargs)
 
@@ -766,7 +843,10 @@ class RequestsMock(object):
         self._patcher.start()
 
     def stop(self, allow_assert=True):
-        self._patcher.stop()
+        if self._patcher:
+            # prevent stopping unstarted patchers
+            self._patcher.stop()
+
         if not self.assert_all_requests_are_fired:
             return
 
@@ -811,13 +891,20 @@ __all__ = [
     "assert_all_requests_are_fired",
     "assert_call_count",
     "calls",
+    "delete",
     "DELETE",
+    "get",
     "GET",
+    "head",
     "HEAD",
+    "options",
     "OPTIONS",
     "passthru_prefixes",
+    "patch",
     "PATCH",
+    "post",
     "POST",
+    "put",
     "PUT",
     "registered",
     "remove",
@@ -837,13 +924,20 @@ add_passthru = _default_mock.add_passthru
 assert_all_requests_are_fired = _default_mock.assert_all_requests_are_fired
 assert_call_count = _default_mock.assert_call_count
 calls = _default_mock.calls
+delete = _default_mock.delete
 DELETE = _default_mock.DELETE
+get = _default_mock.get
 GET = _default_mock.GET
+head = _default_mock.head
 HEAD = _default_mock.HEAD
+options = _default_mock.options
 OPTIONS = _default_mock.OPTIONS
 passthru_prefixes = _default_mock.passthru_prefixes
+patch = _default_mock.patch
 PATCH = _default_mock.PATCH
+post = _default_mock.post
 POST = _default_mock.POST
+put = _default_mock.put
 PUT = _default_mock.PUT
 registered = _default_mock.registered
 remove = _default_mock.remove

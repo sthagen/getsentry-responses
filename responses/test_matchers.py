@@ -1,7 +1,8 @@
 import pytest
 import requests
-import responses
 from requests.exceptions import ConnectionError
+
+import responses
 from responses import matchers
 
 
@@ -97,6 +98,52 @@ def test_query_params_numbers():
             ],
         )
         requests.get("https://example.com", params=expected_query_params)
+
+    run()
+    assert_reset()
+
+
+def test_query_param_matcher_loose():
+    @responses.activate
+    def run():
+        expected_query_params = {"only_one_param": "test"}
+        responses.add(
+            responses.GET,
+            "https://example.com/",
+            match=[
+                matchers.query_param_matcher(expected_query_params, strict_match=False),
+            ],
+        )
+        requests.get(
+            "https://example.com", params={"only_one_param": "test", "second": "param"}
+        )
+
+    run()
+    assert_reset()
+
+
+def test_query_param_matcher_loose_fail():
+    @responses.activate
+    def run():
+        expected_query_params = {"does_not_exist": "test"}
+        responses.add(
+            responses.GET,
+            "https://example.com/",
+            match=[
+                matchers.query_param_matcher(expected_query_params, strict_match=False),
+            ],
+        )
+        with pytest.raises(ConnectionError) as exc:
+            requests.get(
+                "https://example.com",
+                params={"only_one_param": "test", "second": "param"},
+            )
+
+        assert (
+            "- GET https://example.com/ Parameters do not match. {} doesn't"
+            " match {does_not_exist: test}\n"
+            "You can use `strict_match=True` to do a strict parameters check."
+        ) in str(exc.value)
 
     run()
     assert_reset()

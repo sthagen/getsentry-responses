@@ -3,21 +3,24 @@
 import inspect
 import os
 import re
-from io import BufferedReader, BytesIO
+import warnings
+from io import BufferedReader
+from io import BytesIO
+from unittest.mock import Mock
+from unittest.mock import patch
 
 import pytest
 import requests
-import responses
-from requests.exceptions import ConnectionError, HTTPError, ChunkedEncodingError
-from responses import (
-    BaseResponse,
-    Response,
-    PassthroughResponse,
-    matchers,
-    CallbackResponse,
-)
+from requests.exceptions import ChunkedEncodingError
+from requests.exceptions import ConnectionError
+from requests.exceptions import HTTPError
 
-from unittest.mock import patch, Mock
+import responses
+from responses import BaseResponse
+from responses import CallbackResponse
+from responses import PassthroughResponse
+from responses import Response
+from responses import matchers
 
 
 def assert_reset():
@@ -585,11 +588,9 @@ def test_callback_match_querystring_default_false():
         assert resp.status_code == status
         assert "foo" in resp.headers
 
-    with pytest.warns(None) as record:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
         run()
-
-    # check that no deprecation warning was raised
-    assert not record
 
     assert_reset()
 
@@ -1157,6 +1158,28 @@ def test_allow_redirects_samehost():
     assert_reset()
 
 
+def test_path_segments():
+    """Test that path segment after ``;`` is preserved.
+
+    Validate compliance with RFC 3986.
+    The path is terminated by the first question mark ("?") or
+    number sign ("#") character, or by the end of the URI.
+    See more about how path should be treated under:
+    https://datatracker.ietf.org/doc/html/rfc3986.html#section-3.3
+    """
+
+    @responses.activate
+    def run():
+        responses.add(responses.GET, "http://example.com/here/we", status=669)
+        responses.add(responses.GET, "http://example.com/here/we;go", status=777)
+
+        resp = requests.get("http://example.com/here/we;go")
+        assert resp.status_code == 777
+
+    run()
+    assert_reset()
+
+
 def test_handles_unicode_querystring():
     url = "http://example.com/test?type=2&ie=utf8&query=汉字"
 
@@ -1660,14 +1683,14 @@ def test_passthru_does_not_persist_across_tests(httpserver):
     def with_a_passthru():
         assert not responses._default_mock.passthru_prefixes
         responses.add_passthru(re.compile(".*"))
-        try:
-            response = requests.get("https://example.com")
-        except ConnectionError as err:  # pragma: no cover
-            if "Failed to establish" in str(err):  # pragma: no cover
-                pytest.skip("Cannot resolve DNS for example.com")  # pragma: no cover
-            raise err  # pragma: no cover
 
-        assert response.status_code == 200
+        # wrap request that is passed through with another mock. That helps
+        # to avoid issues if real URL is unavailable, allow to run tests offline
+        with responses.RequestsMock(target="responses._real_send") as rsp:
+            rsp.add(responses.GET, "https://example66.ru", status=969)
+            response = requests.get("https://example66.ru")
+
+            assert response.status_code == 969
 
     @responses.activate
     def without_a_passthru():
@@ -1816,6 +1839,7 @@ def test_fail_request_error():
         with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
             rsps.add("POST", "http://example1.com")
             rsps.add("GET", "http://example.com")
+            rsps.add_passthru("http://other.example.com")
 
             with pytest.raises(ConnectionError) as excinfo:
                 requests.post("http://example.com", data={"id": "bad"})
@@ -1823,6 +1847,7 @@ def test_fail_request_error():
             msg = str(excinfo.value)
             assert "- POST http://example1.com/ URL does not match" in msg
             assert "- GET http://example.com/ Method does not match" in msg
+            assert "Passthru prefixes:\n- http://other.example.com" in msg
 
     run()
     assert_reset()
@@ -1982,3 +2007,110 @@ async def test_async_calls():
 
     await run()
     assert_reset()
+
+
+class TestMultipleWrappers:
+    """Test to validate that multiple decorators could be applied.
+
+    Ensures that we can call one function that is wrapped with
+    ``responses.activate`` decorator from within another wrapped function.
+
+    Validates that mock patch is not leaked to other tests.
+    For more detail refer to https://github.com/getsentry/responses/issues/481
+    """
+
+    @responses.activate
+    def test_wrapped(self):
+        responses.add(responses.GET, "http://example.com/1", body="Hello 1")
+        assert b"Hello 1" == requests.get("http://example.com/1").content
+
+    @responses.activate
+    def test_call_another_wrapped_function(self):
+        self.test_wrapped()
+
+    def test_mock_not_leaked(self, httpserver):
+        """
+        Validate that ``responses.activate`` does not leak to unpatched test.
+
+        Parameters
+        ----------
+        httpserver : ContentServer
+            Mock real HTTP server
+
+        """
+        httpserver.serve_content("OK", code=969, headers={"Content-Type": "text/plain"})
+
+        response = requests.get(httpserver.url)
+        assert response.status_code == 969
+
+
+class TestShortcuts:
+    def test_delete(self):
+        @responses.activate
+        def run():
+            responses.delete("http://example.com/1", status=888)
+            resp = requests.delete("http://example.com/1")
+            assert resp.status_code == 888
+
+        run()
+        assert_reset()
+
+    def test_get(self):
+        @responses.activate
+        def run():
+            responses.get("http://example.com/1", status=888)
+            resp = requests.get("http://example.com/1")
+            assert resp.status_code == 888
+
+        run()
+        assert_reset()
+
+    def test_head(self):
+        @responses.activate
+        def run():
+            responses.head("http://example.com/1", status=888)
+            resp = requests.head("http://example.com/1")
+            assert resp.status_code == 888
+
+        run()
+        assert_reset()
+
+    def test_options(self):
+        @responses.activate
+        def run():
+            responses.options("http://example.com/1", status=888)
+            resp = requests.options("http://example.com/1")
+            assert resp.status_code == 888
+
+        run()
+        assert_reset()
+
+    def test_patch(self):
+        @responses.activate
+        def run():
+            responses.patch("http://example.com/1", status=888)
+            resp = requests.patch("http://example.com/1")
+            assert resp.status_code == 888
+
+        run()
+        assert_reset()
+
+    def test_post(self):
+        @responses.activate
+        def run():
+            responses.post("http://example.com/1", status=888)
+            resp = requests.post("http://example.com/1")
+            assert resp.status_code == 888
+
+        run()
+        assert_reset()
+
+    def test_put(self):
+        @responses.activate
+        def run():
+            responses.put("http://example.com/1", status=888)
+            resp = requests.put("http://example.com/1")
+            assert resp.status_code == 888
+
+        run()
+        assert_reset()
