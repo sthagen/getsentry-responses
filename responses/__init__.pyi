@@ -1,11 +1,9 @@
 from collections import Sequence
 from collections import Sized
 from io import BufferedReader
-from io import BytesIO
 from re import Pattern
 from typing import Any
 from typing import Callable
-from typing import Dict
 from typing import Iterable
 from typing import Iterator
 from typing import List
@@ -23,7 +21,6 @@ from urllib.parse import quote as quote
 
 from requests.adapters import HTTPResponse
 from requests.adapters import PreparedRequest
-from requests.cookies import RequestsCookieJar
 from typing_extensions import Literal
 
 # Not currently exposed in typestubs, thus, ignore
@@ -31,23 +28,6 @@ from urllib3.response import HTTPHeaderDict  # type: ignore
 
 from .matchers import json_params_matcher
 from .matchers import urlencoded_params_matcher
-
-def _clean_unicode(url: str) -> str: ...
-def _cookies_from_headers(headers: Dict[str, str]) -> RequestsCookieJar: ...
-def _ensure_str(s: str) -> str: ...
-def _ensure_url_default_path(
-    url: Union[Pattern[str], str]
-) -> Union[Pattern[str], str]: ...
-def _get_url_and_path(url: str) -> str: ...
-def _handle_body(
-    body: Optional[Union[bytes, BufferedReader, str]]
-) -> Union[BufferedReader, BytesIO]: ...
-def _has_unicode(s: str) -> bool: ...
-def _is_string(s: Union[Pattern[str], str]) -> bool: ...
-def get_wrapped(
-    func: Callable[..., Any], responses: RequestsMock, registry: Optional[Any]
-) -> Callable[..., Any]: ...
-
 
 class Call(NamedTuple):
     request: PreparedRequest
@@ -213,7 +193,6 @@ class RequestsMock:
     def _set_registry(self, registry: Any) -> None: ...
     def get_registry(self) -> Any: ...
 
-
 HeaderSet = Optional[Union[Mapping[str, str], List[Tuple[str, str]]]]
 
 class _Add(Protocol):
@@ -231,7 +210,7 @@ class _Add(Protocol):
         adding_headers: HeaderSet = ...,
         match_querystring: bool = ...,
         match: MatcherIterable = ...,
-    ) -> None: ...
+    ) -> BaseResponse: ...
 
 class _Shortcut(Protocol):
     def __call__(
@@ -247,30 +226,30 @@ class _Shortcut(Protocol):
         adding_headers: HeaderSet = ...,
         match_querystring: bool = ...,
         match: MatcherIterable = ...,
-    ) -> None: ...
+    ) -> BaseResponse: ...
 
 class _AddCallback(Protocol):
     def __call__(
         self,
         method: str,
         url: Union[Pattern[str], str],
-        callback: Callable[[PreparedRequest], Union[Exception, Tuple[int, Mapping[str, str], _Body]]],
+        callback: Callable[
+            [PreparedRequest], Union[Exception, Tuple[int, Mapping[str, str], _Body]]
+        ],
         match_querystring: bool = ...,
         content_type: Optional[str] = ...,
         match: MatcherIterable = ...,
     ) -> None: ...
 
 class _AddPassthru(Protocol):
-    def __call__(
-        self, prefix: Union[Pattern[str], str]
-    ) -> None: ...
+    def __call__(self, prefix: Union[Pattern[str], str]) -> None: ...
 
 class _Remove(Protocol):
     def __call__(
         self,
         method_or_response: Optional[Union[str, BaseResponse]] = ...,
         url: Optional[Union[Pattern[str], str]] = ...,
-    ) -> None: ...
+    ) -> List[BaseResponse]: ...
 
 class _Replace(Protocol):
     def __call__(
@@ -286,7 +265,7 @@ class _Replace(Protocol):
         adding_headers: HeaderSet = ...,
         match_querystring: bool = ...,
         match: MatcherIterable = ...,
-    ) -> None: ...
+    ) -> BaseResponse: ...
 
 class _Upsert(Protocol):
     def __call__(
@@ -302,11 +281,10 @@ class _Upsert(Protocol):
         adding_headers: HeaderSet = ...,
         match_querystring: bool = ...,
         match: MatcherIterable = ...,
-    ) -> None: ...
+    ) -> BaseResponse: ...
 
 class _Registered(Protocol):
     def __call__(self) -> List[Response]: ...
-
 
 class _Activate(Protocol):
     # see https://github.com/getsentry/responses/pull/469 for more details
@@ -316,9 +294,10 @@ class _Activate(Protocol):
     # use this overload for scenario when 'responses.activate' is used
 
     @overload
-    def __call__(self, registry: Type[Any] = ...) -> Callable[['_F'], '_F']: ...
-    # use this overload for scenario when 'responses.activate(registry=)' is used
-
+    def __call__(
+        self, registry: Type[Any] = ..., assert_all_requests_are_fired: bool = ...
+    ) -> Callable[["_F"], "_F"]: ...
+    # use this overload for scenario when 'responses.activate(registry=, assert_all_requests_are_fired=True)' is used
 
 activate: _Activate
 add: _Add

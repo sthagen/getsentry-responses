@@ -1,5 +1,4 @@
 include README.rst CHANGES LICENSE
-include test_responses.py test_matchers.py test_registries.py
-include **/*.pyi
+recursive-include responses *.py
 include tox.ini
 global-exclude *~

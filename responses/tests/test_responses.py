@@ -6,14 +6,18 @@ import re
 import warnings
 from io import BufferedReader
 from io import BytesIO
+from typing import Any
+from typing import Optional
 from unittest.mock import Mock
 from unittest.mock import patch
 
 import pytest
 import requests
+from requests.adapters import MaxRetryError
 from requests.exceptions import ChunkedEncodingError
 from requests.exceptions import ConnectionError
 from requests.exceptions import HTTPError
+from urllib3.util.retry import Retry
 
 import responses
 from responses import BaseResponse
@@ -21,14 +25,17 @@ from responses import CallbackResponse
 from responses import PassthroughResponse
 from responses import Response
 from responses import matchers
+from responses import registries
 
 
 def assert_reset():
-    assert len(responses._default_mock.registered()) == 0
+    assert len(responses.mock.registered()) == 0
     assert len(responses.calls) == 0
 
 
-def assert_response(resp, body=None, content_type="text/plain"):
+def assert_response(
+    resp: Any, body: Optional[Any] = None, content_type: "Optional[str]" = "text/plain"
+) -> None:
     assert resp.status_code == 200
     assert resp.reason == "OK"
     if content_type is not None:
@@ -612,7 +619,7 @@ def test_callback_exception_result():
     result = Exception()
     url = "http://example.com/"
 
-    def request_callback(request):
+    def request_callback(_request):
         return result
 
     @responses.activate
@@ -632,7 +639,7 @@ def test_callback_exception_body():
     body = Exception()
     url = "http://example.com/"
 
-    def request_callback(request):
+    def request_callback(_request):
         return 200, {}, body
 
     @responses.activate
@@ -673,7 +680,7 @@ def test_callback_no_content_type():
 
 
 def test_callback_content_type_dict():
-    def request_callback(request):
+    def request_callback(_request):
         return (
             200,
             {"Content-Type": "application/json"},
@@ -692,7 +699,7 @@ def test_callback_content_type_dict():
 
 
 def test_callback_matchers():
-    def request_callback(request):
+    def request_callback(_request):
         return (
             200,
             {"Content-Type": "application/json"},
@@ -748,7 +755,7 @@ def test_callback_matchers_fail():
 
 
 def test_callback_content_type_tuple():
-    def request_callback(request):
+    def request_callback(_request):
         return (
             200,
             [("Content-Type", "application/json")],
@@ -811,7 +818,7 @@ def test_custom_adapter():
         session = requests.Session()
         session.mount("http://", DummyAdapter())
 
-        resp = session.get(url, allow_redirects=False)
+        session.get(url, allow_redirects=False)
         assert calls[0] == 1
 
         # Test that the response is still correctly emulated
@@ -846,7 +853,7 @@ def test_responses_as_context_manager():
 
 def test_activate_doesnt_change_signature():
     def test_function(a, b=None):
-        return (a, b)
+        return a, b
 
     decorated_test_function = responses.activate(test_function)
     assert inspect.signature(test_function) == inspect.signature(
@@ -918,7 +925,7 @@ def test_activate_doesnt_change_signature_with_return_type():
 def test_activate_doesnt_change_signature_for_method():
     class TestCase(object):
         def test_function(self, a, b=None):
-            return (self, a, b)
+            return self, a, b
 
         decorated_test_function = responses.activate(test_function)
 
@@ -933,8 +940,8 @@ def test_response_cookies():
     headers = {"set-cookie": "session_id=12345; a=b; c=d"}
     url = "http://example.com/"
 
-    def request_callback(request):
-        return (status, headers, body)
+    def request_callback(_request):
+        return status, headers, body
 
     @responses.activate
     def run():
@@ -944,7 +951,7 @@ def test_response_cookies():
         assert resp.status_code == status
         assert "session_id" in resp.cookies
         assert resp.cookies["session_id"] == "12345"
-        assert set(resp.cookies.keys()) == set(["session_id"])
+        assert set(resp.cookies.keys()) == {"session_id"}
 
     run()
     assert_reset()
@@ -956,8 +963,8 @@ def test_response_cookies_secure():
     headers = {"set-cookie": "session_id=12345; a=b; c=d; secure"}
     url = "http://example.com/"
 
-    def request_callback(request):
-        return (status, headers, body)
+    def request_callback(_request):
+        return status, headers, body
 
     @responses.activate
     def run():
@@ -967,7 +974,7 @@ def test_response_cookies_secure():
         assert resp.status_code == status
         assert "session_id" in resp.cookies
         assert resp.cookies["session_id"] == "12345"
-        assert set(resp.cookies.keys()) == set(["session_id"])
+        assert set(resp.cookies.keys()) == {"session_id"}
 
     run()
     assert_reset()
@@ -982,8 +989,8 @@ def test_response_cookies_multiple():
     ]
     url = "http://example.com/"
 
-    def request_callback(request):
-        return (status, headers, body)
+    def request_callback(_request):
+        return status, headers, body
 
     @responses.activate
     def run():
@@ -991,7 +998,7 @@ def test_response_cookies_multiple():
         resp = requests.get(url)
         assert resp.text == "test callback"
         assert resp.status_code == status
-        assert set(resp.cookies.keys()) == set(["1P_JAR", "NID"])
+        assert set(resp.cookies.keys()) == {"1P_JAR", "NID"}
         assert resp.cookies["1P_JAR"] == "2019-12-31-23"
         assert resp.cookies["NID"] == "some=value"
 
@@ -1021,11 +1028,11 @@ def test_response_cookies_session(request_stream, responses_stream):
 
         assert "mycookie" in resp.cookies
         assert resp.cookies["mycookie"] == "cookieval"
-        assert set(resp.cookies.keys()) == set(["mycookie"])
+        assert set(resp.cookies.keys()) == {"mycookie"}
 
         assert "mycookie" in session.cookies
         assert session.cookies["mycookie"] == "cookieval"
-        assert set(session.cookies.keys()) == set(["mycookie"])
+        assert set(session.cookies.keys()) == {"mycookie"}
 
     run()
     assert_reset()
@@ -1035,9 +1042,9 @@ def test_response_callback():
     """adds a callback to decorate the response, then checks it"""
 
     def run():
-        def response_callback(resp):
-            resp._is_mocked = True
-            return resp
+        def response_callback(response):
+            response._is_mocked = True
+            return response
 
         with responses.RequestsMock(response_callback=response_callback) as m:
             m.add(responses.GET, "http://example.com", body=b"test")
@@ -1051,7 +1058,7 @@ def test_response_callback():
 
 
 def test_response_filebody():
-    """ Adds the possibility to use actual (binary) files as responses """
+    """Adds the possibility to use actual (binary) files as responses"""
 
     def run():
         current_file = os.path.abspath(__file__)
@@ -1079,7 +1086,7 @@ def test_use_stream_twice_to_double_raw_io():
 
 
 def test_assert_all_requests_are_fired():
-    def request_callback(request):
+    def request_callback(_request):
         raise BaseException()
 
     def run():
@@ -1694,7 +1701,7 @@ def test_passthru_does_not_persist_across_tests(httpserver):
 
     @responses.activate
     def with_a_passthru():
-        assert not responses._default_mock.passthru_prefixes
+        assert not responses.mock.passthru_prefixes
         responses.add_passthru(re.compile(".*"))
 
         # wrap request that is passed through with another mock. That helps
@@ -1707,7 +1714,7 @@ def test_passthru_does_not_persist_across_tests(httpserver):
 
     @responses.activate
     def without_a_passthru():
-        assert not responses._default_mock.passthru_prefixes
+        assert not responses.mock.passthru_prefixes
         with pytest.raises(requests.exceptions.ConnectionError):
             requests.get("https://example.com")
 
@@ -1747,17 +1754,6 @@ def test_custom_target(monkeypatch):
     requests_mock.start()
     assert len(patch_mock.call_args_list) == 1
     assert patch_mock.call_args[1]["target"] == "something.else"
-
-
-def test_cookies_from_headers():
-    text = "こんにちは/世界"
-    quoted_text = responses.quote(text)
-    expected = {"x": "a", "y": quoted_text}
-    headers = {"set-cookie": "; ".join(k + "=" + v for k, v in expected.items())}
-    cookiejar = responses._cookies_from_headers(headers)
-    for k, v in cookiejar.items():
-        assert isinstance(v, str)
-        assert v == expected[k]
 
 
 @pytest.mark.parametrize(
@@ -1837,6 +1833,50 @@ def test_assert_call_count(url):
         assert "Expected URL '{0}' to be called 3 times. Called 2 times.".format(
             url
         ) in str(excinfo.value)
+
+    run()
+    assert_reset()
+
+
+def test_call_count_with_matcher():
+    @responses.activate
+    def run():
+        rsp = responses.add(
+            responses.GET,
+            "http://www.example.com",
+            match=(matchers.query_param_matcher({}),),
+        )
+        rsp2 = responses.add(
+            responses.GET,
+            "http://www.example.com",
+            match=(matchers.query_param_matcher({"hello": "world"}),),
+            status=777,
+        )
+        requests.get("http://www.example.com")
+        resp1 = requests.get("http://www.example.com")
+        requests.get("http://www.example.com?hello=world")
+        resp2 = requests.get("http://www.example.com?hello=world")
+
+        assert resp1.status_code == 200
+        assert resp2.status_code == 777
+
+        assert rsp.call_count == 2
+        assert rsp2.call_count == 2
+
+    run()
+    assert_reset()
+
+
+def test_call_count_without_matcher():
+    @responses.activate
+    def run():
+        rsp = responses.add(responses.GET, "http://www.example.com")
+        requests.get("http://www.example.com")
+        requests.get("http://www.example.com")
+        requests.get("http://www.example.com?hello=world")
+        requests.get("http://www.example.com?hello=world")
+
+        assert rsp.call_count == 4
 
     run()
     assert_reset()
@@ -2022,6 +2062,71 @@ async def test_async_calls():
     assert_reset()
 
 
+class TestStrictWrapper:
+    def test_strict_wrapper(self):
+        """Test that assert_all_requests_are_fired could be applied to the decorator."""
+
+        @responses.activate(assert_all_requests_are_fired=True)
+        def run_strict():
+            responses.add(responses.GET, "https://someapi1.com/", "success")
+            responses.add(responses.GET, "https://notcalled1.com/", "success")
+            requests.get("https://someapi1.com/")
+            assert responses.mock.assert_all_requests_are_fired
+
+        @responses.activate(assert_all_requests_are_fired=False)
+        def run_not_strict():
+            responses.add(responses.GET, "https://someapi2.com/", "success")
+            responses.add(responses.GET, "https://notcalled2.com/", "success")
+            requests.get("https://someapi2.com/")
+            assert not responses.mock.assert_all_requests_are_fired
+
+        @responses.activate
+        def run_classic():
+            responses.add(responses.GET, "https://someapi3.com/", "success")
+            responses.add(responses.GET, "https://notcalled3.com/", "success")
+            requests.get("https://someapi3.com/")
+            assert not responses.mock.assert_all_requests_are_fired
+
+        # keep the order of function calls to ensure that decorator doesn't leak to another function
+        with pytest.raises(AssertionError) as exc_info:
+            run_strict()
+
+        # check that one URL is in uncalled assertion
+        assert "https://notcalled1.com/" in str(exc_info.value)
+
+        run_classic()
+        run_not_strict()
+
+    @pytest.mark.parametrize("assert_fired", (True, False, None))
+    def test_nested_decorators(self, assert_fired):
+        """Validate if assert_all_requests_are_fired is applied from the correct function.
+
+        assert_all_requests_are_fired must be applied from the function
+        where call to 'requests' is done.
+        Test matrix of True/False/None values applied to validate different scenarios.
+        """
+
+        @responses.activate(assert_all_requests_are_fired=assert_fired)
+        def wrapped():
+            responses.add(responses.GET, "https://notcalled1.com/", "success")
+            responses.add(responses.GET, "http://example.com/1", body="Hello 1")
+            assert b"Hello 1" == requests.get("http://example.com/1").content
+
+        @responses.activate(assert_all_requests_are_fired=not assert_fired)
+        def call_another_wrapped_function():
+            responses.add(responses.GET, "https://notcalled2.com/", "success")
+            wrapped()
+
+        if assert_fired:
+            with pytest.raises(AssertionError) as exc_info:
+                call_another_wrapped_function()
+
+            assert "https://notcalled1.com/" in str(exc_info.value)
+            assert "https://notcalled2.com/" in str(exc_info.value)
+        else:
+            call_another_wrapped_function()
+
+
 class TestMultipleWrappers:
     """Test to validate that multiple decorators could be applied.
 
@@ -2129,6 +2234,60 @@ class TestShortcuts:
         assert_reset()
 
 
+class TestUnitTestPatchSetup:
+    """Validates that ``RequestsMock`` could be used as ``mock.patch``.
+
+    This class is present as example in README.rst
+
+    """
+
+    def setup(self):
+        self.r_mock = responses.RequestsMock(assert_all_requests_are_fired=True)
+        self.r_mock.start()
+        self.r_mock.get("https://example.com", status=505)
+        self.r_mock.put("https://example.com", status=506)
+
+    def teardown(self):
+        self.r_mock.stop()
+        self.r_mock.reset()
+
+        assert_reset()
+
+    def test_function(self):
+        resp = requests.get("https://example.com")
+        assert resp.status_code == 505
+
+        resp = requests.put("https://example.com")
+        assert resp.status_code == 506
+
+
+class TestUnitTestPatchSetupRaises:
+    """Validate that teardown raises if not all requests were executed.
+
+    Similar to ``TestUnitTestPatchSetup``.
+
+    """
+
+    def setup(self):
+        self.r_mock = responses.RequestsMock()
+        self.r_mock.start()
+        self.r_mock.get("https://example.com", status=505)
+        self.r_mock.put("https://example.com", status=506)
+
+    def teardown(self):
+        with pytest.raises(AssertionError) as exc:
+            self.r_mock.stop()
+        self.r_mock.reset()
+
+        assert "[('PUT', 'https://example.com/')]" in str(exc.value)
+
+        assert_reset()
+
+    def test_function(self):
+        resp = requests.get("https://example.com")
+        assert resp.status_code == 505
+
+
 def test_reset_in_the_middle():
     @responses.activate
     def run():
@@ -2140,3 +2299,160 @@ def test_reset_in_the_middle():
 
     run()
     assert_reset()
+
+
+def test_redirect():
+    @responses.activate
+    def run():
+        # create multiple Response objects where first two contain redirect headers
+        rsp1 = responses.Response(
+            responses.GET,
+            "http://example.com/1",
+            status=301,
+            headers={"Location": "http://example.com/2"},
+        )
+        rsp2 = responses.Response(
+            responses.GET,
+            "http://example.com/2",
+            status=301,
+            headers={"Location": "http://example.com/3"},
+        )
+        rsp3 = responses.Response(responses.GET, "http://example.com/3", status=200)
+
+        # register above generated Responses in `response` module
+        responses.add(rsp1)
+        responses.add(rsp2)
+        responses.add(rsp3)
+
+        # do the first request in order to generate genuine `requests` response
+        # this object will contain genuine attributes of the response, like `history`
+        rsp = requests.get("http://example.com/1")
+        responses.calls.reset()
+
+        # customize exception with `response` attribute
+        my_error = requests.ConnectionError("custom error")
+        my_error.response = rsp
+
+        # update body of the 3rd response with Exception, this will be raised during execution
+        rsp3.body = my_error
+
+        with pytest.raises(requests.ConnectionError) as exc_info:
+            requests.get("http://example.com/1")
+
+        assert exc_info.value.args[0] == "custom error"
+        assert rsp1.url in exc_info.value.response.history[0].url
+        assert rsp2.url in exc_info.value.response.history[1].url
+
+    run()
+    assert_reset()
+
+
+class TestMaxRetry:
+    def test_max_retries(self):
+        """This example is present in README.rst"""
+
+        @responses.activate(registry=registries.OrderedRegistry)
+        def run():
+            url = "https://example.com"
+            rsp1 = responses.get(url, body="Error", status=500)
+            rsp2 = responses.get(url, body="Error", status=500)
+            rsp3 = responses.get(url, body="Error", status=500)
+            rsp4 = responses.get(url, body="OK", status=200)
+
+            session = requests.Session()
+
+            adapter = requests.adapters.HTTPAdapter(
+                max_retries=Retry(
+                    total=4,
+                    backoff_factor=0.1,
+                    status_forcelist=[500],
+                    method_whitelist=["GET", "POST", "PATCH"],
+                )
+            )
+            session.mount("https://", adapter)
+
+            resp = session.get(url)
+
+            assert resp.status_code == 200
+            assert rsp1.call_count == 1
+            assert rsp2.call_count == 1
+            assert rsp3.call_count == 1
+            assert rsp4.call_count == 1
+
+        run()
+        assert_reset()
+
+    @pytest.mark.parametrize("raise_on_status", (True, False))
+    def test_max_retries_exceed(self, raise_on_status):
+        @responses.activate(registry=registries.OrderedRegistry)
+        def run():
+            url = "https://example.com"
+            rsp1 = responses.get(url, body="Error", status=500)
+            rsp2 = responses.get(url, body="Error", status=500)
+            rsp3 = responses.get(url, body="Error", status=500)
+
+            session = requests.Session()
+
+            adapter = requests.adapters.HTTPAdapter(
+                max_retries=Retry(
+                    total=2,
+                    backoff_factor=0.1,
+                    status_forcelist=[500],
+                    method_whitelist=["GET", "POST", "PATCH"],
+                    raise_on_status=raise_on_status,
+                )
+            )
+            session.mount("https://", adapter)
+
+            if raise_on_status:
+                with pytest.raises(MaxRetryError):
+                    session.get(url)
+            else:
+                resp = session.get(url)
+                assert resp.status_code == 500
+
+            assert rsp1.call_count == 1
+            assert rsp2.call_count == 1
+            assert rsp3.call_count == 1
+
+        run()
+        assert_reset()
+
+    def test_adapter_retry_untouched(self):
+        """Validate that every new request uses brand-new Retry object"""
+
+        @responses.activate(registry=registries.OrderedRegistry)
+        def run():
+            url = "https://example.com"
+            error_rsp = responses.get(url, body="Error", status=500)
+            responses.add(error_rsp)
+            responses.add(error_rsp)
+            ok_rsp = responses.get(url, body="OK", status=200)
+
+            responses.add(error_rsp)
+            responses.add(error_rsp)
+            responses.add(error_rsp)
+            responses.add(ok_rsp)
+
+            session = requests.Session()
+
+            adapter = requests.adapters.HTTPAdapter(
+                max_retries=Retry(
+                    total=4,
+                    backoff_factor=0.1,
+                    status_forcelist=[500],
+                    method_whitelist=["GET", "POST", "PATCH"],
+                )
+            )
+            session.mount("https://", adapter)
+
+            resp = session.get(url)
+            assert resp.status_code == 200
+
+            resp = session.get(url)
+            assert resp.status_code == 200
+
+            assert len(responses.calls) == 8
+
+        run()
+        assert_reset()

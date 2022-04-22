@@ -1,3 +1,16 @@
+0.21.0
+------
+
+* Add `threading.Lock()` to allow `responses` working with `threading` module.
+* Add `urllib3` `Retry` mechanism. See #135
+* Removed internal `_cookies_from_headers` function
+* Now `add`, `upsert`, `replace` methods return registered response.
+  `remove` method returns list of removed responses.
+* Added null value support in `urlencoded_params_matcher` via `allow_blank` keyword argument
+* Added strict version of decorator. Now you can apply `@responses.activate(assert_all_requests_are_fired=True)`
+  to your function to validate that all requests were executed in the wrapped function. See #183
+
+
 0.20.0
 ------
 
@@ -27,6 +40,7 @@
   number sign ("#") character, or by the end of the URI.
 * An error is now raised when both `content_type` and `headers[content-type]` are provided as parameters.
 * When a request isn't matched the passthru prefixes are now included in error messages.
+
 
 0.18.0
 ------
