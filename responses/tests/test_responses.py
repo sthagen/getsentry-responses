@@ -13,10 +13,10 @@ from unittest.mock import patch
 
 import pytest
 import requests
-from requests.adapters import MaxRetryError
 from requests.exceptions import ChunkedEncodingError
 from requests.exceptions import ConnectionError
 from requests.exceptions import HTTPError
+from requests.exceptions import RetryError
 from urllib3.util.retry import Retry
 
 import responses
@@ -2386,6 +2386,21 @@ def test_redirect():
 
 
 class TestMaxRetry:
+    def set_session(self, total=4, raise_on_status=True):
+        session = requests.Session()
+
+        adapter = requests.adapters.HTTPAdapter(
+            max_retries=Retry(
+                total=total,
+                backoff_factor=0.1,
+                status_forcelist=[500],
+                method_whitelist=["GET", "POST", "PATCH"],
+                raise_on_status=raise_on_status,
+            )
+        )
+        session.mount("https://", adapter)
+        return session
+
     def test_max_retries(self):
         """This example is present in README.rst"""
 
@@ -2397,17 +2412,7 @@ class TestMaxRetry:
             rsp3 = responses.get(url, body="Error", status=500)
             rsp4 = responses.get(url, body="OK", status=200)
 
-            session = requests.Session()
-
-            adapter = requests.adapters.HTTPAdapter(
-                max_retries=Retry(
-                    total=4,
-                    backoff_factor=0.1,
-                    status_forcelist=[500],
-                    method_whitelist=["GET", "POST", "PATCH"],
-                )
-            )
-            session.mount("https://", adapter)
+            session = self.set_session()
 
             resp = session.get(url)
 
@@ -2429,21 +2434,10 @@ class TestMaxRetry:
             rsp2 = responses.get(url, body="Error", status=500)
             rsp3 = responses.get(url, body="Error", status=500)
 
-            session = requests.Session()
-
-            adapter = requests.adapters.HTTPAdapter(
-                max_retries=Retry(
-                    total=2,
-                    backoff_factor=0.1,
-                    status_forcelist=[500],
-                    method_whitelist=["GET", "POST", "PATCH"],
-                    raise_on_status=raise_on_status,
-                )
-            )
-            session.mount("https://", adapter)
+            session = self.set_session(total=2, raise_on_status=raise_on_status)
 
             if raise_on_status:
-                with pytest.raises(MaxRetryError):
+                with pytest.raises(RetryError):
                     session.get(url)
             else:
                 resp = session.get(url)
@@ -2452,6 +2446,23 @@ class TestMaxRetry:
             assert rsp1.call_count == 1
             assert rsp2.call_count == 1
             assert rsp3.call_count == 1
+
+        run()
+        assert_reset()
+
+    def test_max_retries_exceed_msg(self):
+        @responses.activate(registry=registries.OrderedRegistry)
+        def run():
+            url = "https://example.com"
+            responses.get(url, body="Error", status=500)
+            responses.get(url, body="Error", status=500)
+
+            session = self.set_session(total=1)
+
+            with pytest.raises(RetryError) as err:
+                session.get(url)
+
+            assert "too many 500 error responses" in str(err.value)
 
         run()
         assert_reset()
@@ -2472,18 +2483,7 @@ class TestMaxRetry:
             responses.add(error_rsp)
             responses.add(ok_rsp)
 
-            session = requests.Session()
-
-            adapter = requests.adapters.HTTPAdapter(
-                max_retries=Retry(
-                    total=4,
-                    backoff_factor=0.1,
-                    status_forcelist=[500],
-                    method_whitelist=["GET", "POST", "PATCH"],
-                )
-            )
-            session.mount("https://", adapter)
-
+            session = self.set_session()
             resp = session.get(url)
             assert resp.status_code == 200
 
