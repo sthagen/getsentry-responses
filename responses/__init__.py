@@ -2,6 +2,7 @@ import inspect
 import json as json_module
 import logging
 from collections import namedtuple
+from functools import partialmethod
 from functools import wraps
 from http import client
 from itertools import groupby
@@ -24,6 +25,7 @@ from typing import Union
 from typing import overload
 from warnings import warn
 
+import toml as _toml
 from requests.adapters import HTTPAdapter
 from requests.adapters import MaxRetryError
 from requests.exceptions import ConnectionError
@@ -64,6 +66,7 @@ from urllib.parse import urlunsplit
 
 if TYPE_CHECKING:  # pragma: no cover
     # import only for linter run
+    import os
     from unittest.mock import _patch as _mock_patcher
 
     from requests import PreparedRequest
@@ -482,6 +485,32 @@ class BaseResponse(object):
         return True, ""
 
 
+def _form_response(
+    body: Union[BufferedReader, BytesIO],
+    headers: Optional[Mapping[str, str]],
+    status: int,
+) -> HTTPResponse:
+    # The requests library's cookie handling depends on the response object
+    # having an original response object with the headers as the `msg`, so
+    # we give it what it needs.
+    data = BytesIO()
+    data.close()
+
+    orig_response = HTTPResponse(
+        body=data,  # required to avoid "ValueError: Unable to determine whether fp is closed."
+        msg=headers,
+        preload_content=False,
+    )
+    return HTTPResponse(
+        status=status,
+        reason=client.responses.get(status, None),
+        body=body,
+        headers=headers,
+        original_response=orig_response,
+        preload_content=False,
+    )
+
+
 class Response(BaseResponse):
     def __init__(
         self,
@@ -543,14 +572,7 @@ class Response(BaseResponse):
             content_length = len(body.getvalue())
             headers["Content-Length"] = str(content_length)
 
-        return HTTPResponse(
-            status=status,
-            reason=client.responses.get(status, None),
-            body=body,
-            headers=headers,
-            original_response=OriginalResponseShim(headers),
-            preload_content=False,
-        )
+        return _form_response(body, headers, status)
 
     def __repr__(self) -> str:
         return (
@@ -612,42 +634,12 @@ class CallbackResponse(BaseResponse):
         body = _handle_body(body)
         headers.extend(r_headers)
 
-        return HTTPResponse(
-            status=status,
-            reason=client.responses.get(status, None),
-            body=body,
-            headers=headers,
-            original_response=OriginalResponseShim(headers),
-            preload_content=False,
-        )
+        return _form_response(body, headers, status)
 
 
 class PassthroughResponse(BaseResponse):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, passthrough=True, **kwargs)
-
-
-class OriginalResponseShim(object):
-    """
-    Shim for compatibility with older versions of urllib3
-
-    requests cookie handling depends on responses having a property chain of
-    `response._original_response.msg` which contains the response headers [1]
-
-    Using HTTPResponse() for this purpose causes compatibility errors with
-    urllib3<1.23.0. To avoid adding more dependencies we can use this shim.
-
-    [1]: https://github.com/psf/requests/blob/75bdc998e2d/requests/cookies.py#L125
-    """
-
-    def __init__(self, headers: Any) -> None:
-        self.msg: Any = headers
-
-    def isclosed(self) -> bool:
-        return True
-
-    def close(self) -> None:
-        return
 
 
 class RequestsMock(object):
@@ -769,26 +761,28 @@ class RequestsMock(object):
         response = Response(method=method, url=url, body=body, **kwargs)
         return self._registry.add(response)
 
-    def delete(self, *args: Any, **kwargs: Any) -> BaseResponse:
-        return self.add(DELETE, *args, **kwargs)
+    delete = partialmethod(add, DELETE)
+    get = partialmethod(add, GET)
+    head = partialmethod(add, HEAD)
+    options = partialmethod(add, OPTIONS)
+    patch = partialmethod(add, PATCH)
+    post = partialmethod(add, POST)
+    put = partialmethod(add, PUT)
 
-    def get(self, *args: Any, **kwargs: Any) -> BaseResponse:
-        return self.add(GET, *args, **kwargs)
+    def _add_from_file(self, file_path: "Union[str, bytes, os.PathLike[Any]]") -> None:
+        with open(file_path) as file:
+            data = _toml.load(file)
 
-    def head(self, *args: Any, **kwargs: Any) -> BaseResponse:
-        return self.add(HEAD, *args, **kwargs)
-
-    def options(self, *args: Any, **kwargs: Any) -> BaseResponse:
-        return self.add(OPTIONS, *args, **kwargs)
-
-    def patch(self, *args: Any, **kwargs: Any) -> BaseResponse:
-        return self.add(PATCH, *args, **kwargs)
-
-    def post(self, *args: Any, **kwargs: Any) -> BaseResponse:
-        return self.add(POST, *args, **kwargs)
-
-    def put(self, *args: Any, **kwargs: Any) -> BaseResponse:
-        return self.add(PUT, *args, **kwargs)
+        for rsp in data["responses"]:
+            rsp = rsp["response"]
+            self.add(
+                method=rsp["method"],
+                url=rsp["url"],
+                body=rsp["body"],
+                status=rsp["status"],
+                content_type=rsp["content_type"],
+                auto_calculate_content_length=rsp["auto_calculate_content_length"],
+            )
 
     def add_passthru(self, prefix: _URLPatternType) -> None:
         """
@@ -1146,6 +1140,7 @@ __all__ = [
     # Exposed by the RequestsMock class:
     "activate",
     "add",
+    "_add_from_file",
     "add_callback",
     "add_passthru",
     "_deprecated_assert_all_requests_are_fired",
@@ -1180,6 +1175,7 @@ __all__ = [
 # expose only methods and/or read-only methods
 activate = _default_mock.activate
 add = _default_mock.add
+_add_from_file = _default_mock._add_from_file
 add_callback = _default_mock.add_callback
 add_passthru = _default_mock.add_passthru
 _deprecated_assert_all_requests_are_fired = _default_mock.assert_all_requests_are_fired
