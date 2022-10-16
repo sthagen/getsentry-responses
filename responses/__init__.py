@@ -25,7 +25,7 @@ from typing import Union
 from typing import overload
 from warnings import warn
 
-import toml as _toml
+import tomli as _toml
 from requests.adapters import HTTPAdapter
 from requests.adapters import MaxRetryError
 from requests.exceptions import ConnectionError
@@ -229,6 +229,14 @@ class CallList(Sequence[Any], Sized):
 
     def __len__(self) -> int:
         return len(self._calls)
+
+    @overload
+    def __getitem__(self, idx: int) -> Call:
+        ...
+
+    @overload
+    def __getitem__(self, idx: slice) -> List[Call]:
+        ...
 
     def __getitem__(self, idx: Union[int, slice]) -> Union[Call, List[Call]]:
         return self._calls[idx]
@@ -770,7 +778,7 @@ class RequestsMock(object):
     put = partialmethod(add, PUT)
 
     def _add_from_file(self, file_path: "Union[str, bytes, os.PathLike[Any]]") -> None:
-        with open(file_path) as file:
+        with open(file_path, "rb") as file:
             data = _toml.load(file)
 
         for rsp in data["responses"]:
