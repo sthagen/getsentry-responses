@@ -25,7 +25,12 @@ from typing import Union
 from typing import overload
 from warnings import warn
 
-import tomli as _toml
+try:
+    import tomli as _toml
+except ImportError:
+    # python 3.11
+    import tomllib as _toml  # type: ignore[no-redef]
+
 from requests.adapters import HTTPAdapter
 from requests.adapters import MaxRetryError
 from requests.exceptions import ConnectionError
@@ -232,11 +237,11 @@ class CallList(Sequence[Any], Sized):
 
     @overload
     def __getitem__(self, idx: int) -> Call:
-        ...
+        """Overload when get a single item."""
 
     @overload
     def __getitem__(self, idx: slice) -> List[Call]:
-        ...
+        """Overload when a slice is requested."""
 
     def __getitem__(self, idx: Union[int, slice]) -> Union[Call, List[Call]]:
         return self._calls[idx]
@@ -925,7 +930,6 @@ class RequestsMock(object):
     @overload
     def activate(self, func: _F = ...) -> _F:
         """Overload for scenario when 'responses.activate' is used."""
-        ...  # pragma: no cover
 
     @overload
     def activate(
@@ -938,9 +942,7 @@ class RequestsMock(object):
         'responses.activate(registry=, assert_all_requests_are_fired=True)' is used.
 
         See https://github.com/getsentry/responses/pull/469 for more details
-
         """
-        ...  # pragma: no cover
 
     def activate(
         self,
