@@ -569,6 +569,7 @@ class Response(BaseResponse):
 
     def get_response(self, request: "PreparedRequest") -> HTTPResponse:
         if self.body and isinstance(self.body, Exception):
+            setattr(self.body, "request", request)
             raise self.body
 
         headers = self.get_headers()
@@ -673,7 +674,7 @@ class RequestsMock(object):
         passthru_prefixes: Tuple[str, ...] = (),
         target: str = "requests.adapters.HTTPAdapter.send",
         registry: Type[FirstMatchRegistry] = FirstMatchRegistry,
-    ):
+    ) -> None:
         self._calls: CallList = CallList()
         self.reset()
         self._registry: FirstMatchRegistry = registry()  # call only after reset

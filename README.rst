@@ -505,6 +505,8 @@ Request Keyword Arguments Matcher
 To validate request arguments use the ``matchers.request_kwargs_matcher`` function to match
 against the request kwargs.
 
+Only following arguments are supported: ``timeout``, ``verify``, ``proxies``, ``stream``, ``cert``.
+
 Note, only arguments provided to ``matchers.request_kwargs_matcher`` will be validated.
 
 .. code-block:: python
@@ -757,6 +759,7 @@ Example that shows how to set custom registry
 
     print("Before tests:", responses.mock.get_registry())
     """ Before tests: <responses.registries.FirstMatchRegistry object> """
+
 
     # using function decorator
     @responses.activate(registry=CustomRegistry)
@@ -1024,7 +1027,6 @@ to check how many times each request was matched.
 
     @responses.activate
     def test_call_count_with_matcher():
-
         rsp = responses.get(
             "http://www.example.com",
             match=(matchers.query_param_matcher({}),),
@@ -1308,7 +1310,6 @@ replaced.
 
     @responses.activate
     def test_replace():
-
         responses.get("http://example.org", json={"data": 1})
         responses.replace(responses.GET, "http://example.org", json={"data": 2})
 
