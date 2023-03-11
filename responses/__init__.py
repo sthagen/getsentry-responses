@@ -25,12 +25,7 @@ from typing import Union
 from typing import overload
 from warnings import warn
 
-try:
-    import tomli as _toml
-except ImportError:
-    # python 3.11
-    import tomllib as _toml  # type: ignore[no-redef]
-
+import yaml
 from requests.adapters import HTTPAdapter
 from requests.adapters import MaxRetryError
 from requests.exceptions import ConnectionError
@@ -783,9 +778,15 @@ class RequestsMock(object):
     post = partialmethod(add, POST)
     put = partialmethod(add, PUT)
 
+    def _parse_response_file(
+        self, file_path: "Union[str, bytes, os.PathLike[Any]]"
+    ) -> "Dict[str, Any]":
+        with open(file_path, "r") as file:
+            data = yaml.safe_load(file)
+        return data
+
     def _add_from_file(self, file_path: "Union[str, bytes, os.PathLike[Any]]") -> None:
-        with open(file_path, "rb") as file:
-            data = _toml.load(file)
+        data = self._parse_response_file(file_path)
 
         for rsp in data["responses"]:
             rsp = rsp["response"]
