@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import pytest
 import requests
+import urllib3
 from requests.exceptions import ChunkedEncodingError
 from requests.exceptions import ConnectionError
 from requests.exceptions import HTTPError
@@ -1534,10 +1535,17 @@ def test_auto_calculate_content_length_doesnt_override_existing_value():
             headers={"Content-Length": "2"},
             auto_calculate_content_length=True,
         )
-        with pytest.raises(ChunkedEncodingError) as excinfo:
-            requests.get(url)
 
-        assert "IncompleteRead(4 bytes read, -2 more expected)" in str(excinfo.value)
+        if urllib3.__version__ < "2":
+            resp = requests.get(url)
+            assert_response(resp, "test")
+            assert resp.headers["Content-Length"] == "2"
+        else:
+            with pytest.raises(ChunkedEncodingError) as excinfo:
+                requests.get(url)
+            assert "IncompleteRead(4 bytes read, -2 more expected)" in str(
+                excinfo.value
+            )
 
     run()
     assert_reset()
@@ -2342,13 +2350,13 @@ class TestUnitTestPatchSetup:
 
     """
 
-    def setup(self):
+    def setup_method(self):
         self.r_mock = responses.RequestsMock(assert_all_requests_are_fired=True)
         self.r_mock.start()
         self.r_mock.get("https://example.com", status=505)
         self.r_mock.put("https://example.com", status=506)
 
-    def teardown(self):
+    def teardown_method(self):
         self.r_mock.stop()
         self.r_mock.reset()
 
@@ -2369,13 +2377,13 @@ class TestUnitTestPatchSetupRaises:
 
     """
 
-    def setup(self):
+    def setup_method(self):
         self.r_mock = responses.RequestsMock()
         self.r_mock.start()
         self.r_mock.get("https://example.com", status=505)
         self.r_mock.put("https://example.com", status=506)
 
-    def teardown(self):
+    def teardown_method(self):
         with pytest.raises(AssertionError) as exc:
             self.r_mock.stop()
         self.r_mock.reset()

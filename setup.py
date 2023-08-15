@@ -18,7 +18,7 @@ setup_requires = []
 
 install_requires = [
     "requests>=2.30.0,<3.0",
-    "urllib3>=2.0.0,<3.0",
+    "urllib3>=1.25.10,<3.0",
     "pyyaml",
     "types-PyYAML",
     "typing_extensions; python_version < '3.8'",
@@ -62,7 +62,7 @@ class PyTest(TestCommand):
 
 setup(
     name="responses",
-    version="0.23.1",
+    version="0.23.3",
     author="David Cramer",
     description="A utility library for mocking out the `requests` Python library.",
     url="https://github.com/getsentry/responses",
