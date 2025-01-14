@@ -36,7 +36,7 @@ extras_require = {"tests": tests_require}
 
 setup(
     name="responses",
-    version="0.25.5",
+    version="0.25.6",
     author="David Cramer",
     description="A utility library for mocking out the `requests` Python library.",
     url="https://github.com/getsentry/responses",
@@ -50,6 +50,9 @@ setup(
     long_description=open("README.rst", encoding="utf-8").read(),
     long_description_content_type="text/x-rst",
     packages=["responses"],
+    package_data={
+        "responses": ["py.typed"],
+    },
     zip_safe=False,
     python_requires=">=3.8",
     install_requires=install_requires,
