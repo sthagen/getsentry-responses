@@ -36,7 +36,7 @@ extras_require = {"tests": tests_require}
 
 setup(
     name="responses",
-    version="0.26.1",
+    version="0.26.2",
     author="David Cramer",
     description="A utility library for mocking out the `requests` Python library.",
     url="https://github.com/getsentry/responses",
@@ -46,7 +46,7 @@ setup(
         "Documentation": "https://github.com/getsentry/responses/blob/master/README.rst",
         "Source Code": "https://github.com/getsentry/responses",
     },
-    license="Apache 2.0",
+    license="Apache-2.0",
     long_description=open("README.rst", encoding="utf-8").read(),
     long_description_content_type="text/x-rst",
     packages=["responses"],
